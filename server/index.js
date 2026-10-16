@@ -11,12 +11,19 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// Supabase Client Setup
+// ── Supabase clients ─────────────────────────────────────────────────────────
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
 const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
+const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
 
+// Service-role client (bypasses RLS — data queries)
 export const supabase = (supabaseUrl && supabaseKey && supabaseUrl.startsWith("http"))
   ? createClient(supabaseUrl, supabaseKey)
+  : null;
+
+// Anon client — used to verify user JWTs (never bypasses RLS)
+const supabaseAnon = (supabaseUrl && supabaseAnonKey && supabaseUrl.startsWith("http"))
+  ? createClient(supabaseUrl, supabaseAnonKey)
   : null;
 
 if (supabase) {
@@ -24,6 +31,55 @@ if (supabase) {
 } else {
   console.log("No Supabase credentials detected. Operating in local demo/fallback mode.");
 }
+
+// ── JWT Auth Middleware ──────────────────────────────────────────────────────
+/**
+ * requireAuth — verifies Supabase JWT from Authorization: Bearer <token>
+ * Attaches req.user (Supabase user object) and req.role to the request.
+ * In demo/fallback mode (no Supabase), passes through with a demo user.
+ */
+async function requireAuth(req, res, next) {
+  if (!supabaseAnon) {
+    // Demo mode — no credentials, allow all and tag as demo owner
+    req.user = { id: "demo", email: "demo@instituteos.app" };
+    req.role = "owner";
+    return next();
+  }
+
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+  if (!token) {
+    return res.status(401).json({ success: false, error: "Missing authorization token." });
+  }
+
+  const { data, error } = await supabaseAnon.auth.getUser(token);
+  if (error || !data?.user) {
+    return res.status(401).json({ success: false, error: "Invalid or expired token." });
+  }
+
+  req.user = data.user;
+  req.role = data.user.app_metadata?.role || "counselor";
+  next();
+}
+
+/**
+ * requireRole — gate a route to specific roles.
+ * Usage: requireRole("owner", "accounts")
+ */
+function requireRole(...allowedRoles) {
+  return (req, res, next) => {
+    if (!req.role || !allowedRoles.includes(req.role)) {
+      return res.status(403).json({
+        success: false,
+        error: `Access denied. Requires one of: ${allowedRoles.join(", ")}. Your role: ${req.role || "unknown"}`,
+      });
+    }
+    next();
+  };
+}
+
+
 
 // 1. Health check & status
 app.get("/api/health", (req, res) => {
@@ -94,7 +150,7 @@ app.get("/api/students", async (req, res) => {
   res.json({ success: true, count: 0, data: [], note: "No Supabase active or table empty" });
 });
 
-app.post("/api/students", async (req, res) => {
+app.post("/api/students", requireAuth, async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required for server-side persistence" });
   }
@@ -123,7 +179,7 @@ app.post("/api/students", async (req, res) => {
   }
 });
 
-app.delete("/api/students/:id", async (req, res) => {
+app.delete("/api/students/:id", requireAuth, requireRole("owner", "counselor"), async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
@@ -166,7 +222,7 @@ app.get("/api/fees", async (req, res) => {
   res.json({ success: true, count: 0, data: [] });
 });
 
-app.post("/api/fees/payment", async (req, res) => {
+app.post("/api/fees/payment", requireAuth, requireRole("owner", "accounts"), async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
