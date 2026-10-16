@@ -10,6 +10,14 @@ import { useSessionStore } from "./state/session.js";
 import { useTheme } from "./app/providers.jsx";
 import { sound } from "./lib/sound.js";
 import { pageVariants, springs } from "./lib/motion.js";
+import {
+  supabaseEnabled,
+  onAuthStateChange,
+  signOut as supabaseSignOut,
+  getUserProfile,
+  getSession,
+} from "./services/supabase.js";
+
 
 // Layout & Common Components
 import MeshBackground from "./components/layout/MeshBackground.jsx";
@@ -53,7 +61,10 @@ export default function App() {
   const { calmMode } = useTheme();
   const prefersReducedMotion = useReducedMotion();
 
+  // Start signed-in only from localStorage demo flag; Supabase session is
+  // checked asynchronously below via onAuthStateChange / getSession.
   const [signedIn, setSignedIn] = useState(hasDemoSession);
+
   const [activeTab, setActiveTab] = useState(() => {
     try {
       if (typeof window !== "undefined") {
@@ -112,6 +123,40 @@ export default function App() {
       console.warn("Lenis initialization skipped:", e);
     }
   }, [calmMode, prefersReducedMotion]);
+
+  // ── Supabase auth state ──────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!supabaseEnabled) return;
+
+    // Check for an existing session on mount (handles page refresh)
+    getSession().then(async (session) => {
+      if (session?.user) {
+        const profile = await getUserProfile(session.user.id);
+        const userRole = profile?.role || session.user.app_metadata?.role || "counselor";
+        setRole(userRole);
+        setSignedIn(true);
+      }
+    });
+
+    // Subscribe to future auth events
+    const unsub = onAuthStateChange(async (event, session) => {
+      if (event === "SIGNED_IN" && session?.user) {
+        const profile = await getUserProfile(session.user.id);
+        const userRole = profile?.role || session.user.app_metadata?.role || "counselor";
+        setRole(userRole);
+        setSignedIn(true);
+      }
+      if (event === "SIGNED_OUT") {
+        try { localStorage.removeItem("instituteos_demo_session"); } catch {}
+        setSignedIn(false);
+        setActiveTab("Dashboard");
+      }
+    });
+
+    return unsub;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
 
   // Load dashboard telemetry data
   const loadDashboardData = useCallback(async (refresh = false) => {
@@ -229,21 +274,26 @@ export default function App() {
     setDrawerOpen(true);
   };
 
-  const signIn = () => {
+  const signIn = (user) => {
     try {
-      localStorage.setItem("instituteos_demo_session", "true");
+      // Only set demo flag when no real Supabase user is provided
+      if (!user) localStorage.setItem("instituteos_demo_session", "true");
     } catch {}
     setSignedIn(true);
     toast.success("Welcome back!", `Signed in as ${userName} (${role.toUpperCase()})`);
   };
 
-  const signOut = () => {
-    try {
-      localStorage.removeItem("instituteos_demo_session");
-    } catch {}
-    setSignedIn(false);
-    setActiveTab("Dashboard");
+  const signOut = async () => {
+    try { localStorage.removeItem("instituteos_demo_session"); } catch {}
+    if (supabaseEnabled) {
+      await supabaseSignOut();
+      // onAuthStateChange SIGNED_OUT will set signedIn=false
+    } else {
+      setSignedIn(false);
+      setActiveTab("Dashboard");
+    }
   };
+
 
   // 1. First-Load Boot Sequence (1.6s on a clean white canvas)
   if (!bootCompleted) {

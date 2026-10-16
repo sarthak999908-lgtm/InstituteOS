@@ -154,3 +154,81 @@ export function subscribeToSupabaseTable(table, callback) {
     supabaseClient.removeChannel(channel);
   };
 }
+
+// ─── Auth Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Sign in with email + password via Supabase Auth.
+ * Returns { user, session, error }.
+ */
+export async function signInWithEmail(email, password) {
+  if (!supabaseClient) return { user: null, session: null, error: new Error("Supabase not configured") };
+  const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
+  return { user: data?.user ?? null, session: data?.session ?? null, error: error ?? null };
+}
+
+/**
+ * Register a new user with email + password.
+ * role and name go into raw_user_meta_data so the handle_new_user() trigger
+ * stamps them into user_profiles and app_metadata automatically.
+ */
+export async function signUpWithEmail(email, password, role = "counselor", name = "") {
+  if (!supabaseClient) return { user: null, session: null, error: new Error("Supabase not configured") };
+  const { data, error } = await supabaseClient.auth.signUp({
+    email,
+    password,
+    options: { data: { role, name: name || email.split("@")[0] } },
+  });
+  return { user: data?.user ?? null, session: data?.session ?? null, error: error ?? null };
+}
+
+/** Sign out the current user. */
+export async function signOut() {
+  if (!supabaseClient) return;
+  await supabaseClient.auth.signOut();
+}
+
+/** Return the currently authenticated Supabase user, or null. */
+export async function getCurrentUser() {
+  if (!supabaseClient) return null;
+  const { data } = await supabaseClient.auth.getUser();
+  return data?.user ?? null;
+}
+
+/** Return the current active session (contains JWT), or null. */
+export async function getSession() {
+  if (!supabaseClient) return null;
+  const { data } = await supabaseClient.auth.getSession();
+  return data?.session ?? null;
+}
+
+/**
+ * Subscribe to auth state changes (SIGNED_IN, SIGNED_OUT, TOKEN_REFRESHED…)
+ * Returns an unsubscribe cleanup function.
+ */
+export function onAuthStateChange(callback) {
+  if (!supabaseClient) return () => {};
+  const { data: { subscription } } = supabaseClient.auth.onAuthStateChange((event, session) => {
+    callback(event, session);
+  });
+  return () => subscription.unsubscribe();
+}
+
+/**
+ * Fetch the user_profiles row for a given userId.
+ * Falls back gracefully when table is missing or offline.
+ */
+export async function getUserProfile(userId) {
+  if (!supabaseClient || !userId) return null;
+  try {
+    const { data, error } = await supabaseClient
+      .from("user_profiles")
+      .select("id, role, name, avatar_url")
+      .eq("id", userId)
+      .single();
+    if (!error && data) return data;
+  } catch (err) {
+    console.warn("getUserProfile fallback:", err);
+  }
+  return null;
+}
