@@ -256,6 +256,147 @@ app.post("/api/fees/payment", requireAuth, requireRole("owner", "accounts"), asy
   }
 });
 
+// 6. Attendance
+app.get("/api/attendance", async (req, res) => {
+  if (supabase) {
+    try {
+      const query = supabase.from("attendance").select(`
+        id, session_id, student_id, status, marked_at,
+        students ( id, name ),
+        sessions ( id, batch_id, date, start_time, end_time )
+      `).order("marked_at", { ascending: false }).limit(200);
+
+      // Optional filters
+      if (req.query.batch_id) query.eq("sessions.batch_id", req.query.batch_id);
+      if (req.query.date) query.eq("sessions.date", req.query.date);
+      if (req.query.student_id) query.eq("student_id", req.query.student_id);
+
+      const { data, error } = await query;
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase attendance error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+app.post("/api/attendance", requireAuth, async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { session_id, records } = req.body;
+  // records = [{ student_id, status }]
+  if (!session_id || !Array.isArray(records)) {
+    return res.status(400).json({ success: false, error: "session_id and records[] are required" });
+  }
+
+  try {
+    const rows = records.map((r) => ({
+      id: `ATT-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      session_id,
+      student_id: r.student_id,
+      status: r.status || "present",
+      marked_at: new Date().toISOString(),
+      marked_by: req.user?.id || "system",
+    }));
+
+    const { data, error } = await supabase.from("attendance").upsert(rows, {
+      onConflict: "session_id,student_id",
+    }).select();
+
+    if (error) throw error;
+    res.json({ success: true, count: data.length, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 7. Trainers
+app.get("/api/trainers", async (req, res) => {
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.from("trainers").select(`
+        id, name, email, phone, specialization, status, created_at,
+        trainer_availability ( day_of_week, start_time, end_time )
+      `).order("name", { ascending: true });
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase trainers error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+// 8. Courses
+app.get("/api/courses", async (req, res) => {
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.from("courses").select("*").order("name", { ascending: true });
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase courses error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+// 9. Audit Log (owner only)
+app.get("/api/audit-log", requireAuth, requireRole("owner"), async (req, res) => {
+  if (supabase) {
+    try {
+      const limit = Math.min(parseInt(req.query.limit) || 50, 200);
+      const { data, error } = await supabase.from("audit_log")
+        .select("*")
+        .order("ts", { ascending: false })
+        .limit(limit);
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase audit_log error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+// 10. User Profile (authenticated user)
+app.get("/api/profile", requireAuth, async (req, res) => {
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.from("user_profiles")
+        .select("id, role, name, avatar_url, created_at, updated_at")
+        .eq("id", req.user.id)
+        .single();
+      if (!error && data) return res.json({ success: true, data });
+    } catch (err) {
+      console.error("Profile fetch error:", err);
+    }
+  }
+  // Demo fallback
+  res.json({
+    success: true,
+    data: { id: req.user?.id || "demo", role: req.role, name: "Demo User", avatar_url: null },
+  });
+});
+
+app.put("/api/profile", requireAuth, async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { name, avatar_url } = req.body;
+  try {
+    const { data, error } = await supabase.from("user_profiles")
+      .update({ name, avatar_url, updated_at: new Date().toISOString() })
+      .eq("id", req.user.id)
+      .select()
+      .single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`InstituteOS API server running at http://localhost:${PORT}`);
 });
