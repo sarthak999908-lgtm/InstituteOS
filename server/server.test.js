@@ -110,4 +110,78 @@ describe("Backend Express API Server", () => {
     expect(body.success).toBe(true);
     expect(body.data).toHaveProperty("role");
   });
+
+  it("GET /api/assignments returns assignments list", async () => {
+    const res = await fetch(`${baseUrl}/assignments`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+  });
+
+  it("GET /api/submissions returns submissions list", async () => {
+    const res = await fetch(`${baseUrl}/submissions`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+  });
+
+  it("GET /api/recordings returns recordings list", async () => {
+    const res = await fetch(`${baseUrl}/recordings`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+  });
+
+  it("GET /api/approvals returns approvals list", async () => {
+    const res = await fetch(`${baseUrl}/approvals`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(Array.isArray(body.data)).toBe(true);
+  });
+
+  it("POST /api/audit-log records an audit event", async () => {
+    const res = await fetch(`${baseUrl}/audit-log`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        action: "test_verification",
+        table_name: "test",
+        record_id: "T1",
+        details: { verified: true },
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body).toHaveProperty("id");
+  });
+
+  it("POST /api/copilot/query processes query through security pipeline", async () => {
+    const res = await fetch(`${baseUrl}/copilot/query`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        prompt: "Show batch roster for Java Morning",
+        intent: "roster_check",
+      }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.data.status).toBe("verified");
+  });
+
+  it("GET /api/system/status returns diagnostic health", async () => {
+    const res = await fetch(`${baseUrl}/system/status`);
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.success).toBe(true);
+    expect(body.data.server).toBe("healthy");
+    expect(body.data).toHaveProperty("uptimeSeconds");
+  });
 });
+

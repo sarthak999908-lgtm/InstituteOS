@@ -7,6 +7,7 @@
     "dev": "vite",
     "server": "node server/index.js",
     "dev:all": "concurrently \"npm run dev\" \"npm run server\"",
+    "db:seed": "node server/seed-runner.js",
     "build": "vite build",
     "lint": "oxlint",
     "test": "vitest run",
