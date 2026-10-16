@@ -7,7 +7,9 @@ import {
 } from "lucide-react";
 import { batches as seedBatches, rooms, trainerAvailability, trainers, users } from "../../data/mockData.js";
 import { createApproval, decideApproval } from "../../lib/database.js";
+import { createApproval as apiCreateApproval, decideApproval as apiDecideApproval, createSession as apiCreateSession } from "../../services/api.js";
 import { solveSchedule } from "./solver.js";
+
 import GlassCard from "../../components/common/GlassCard.jsx";
 import MagneticButton from "../../components/common/MagneticButton.jsx";
 import HoldToConfirm from "../../components/common/HoldToConfirm.jsx";
@@ -148,13 +150,17 @@ export default function SchedulesPage({ role, userId }) {
       }
 
       sound.shimmer();
-      const approval = await createApproval({
+      const approvalData = {
         role,
         userId,
         kind: "schedule_replan",
         payload: { grid: result.grid, changes: result.changes },
         preview: `${result.changes.length} timetable change${result.changes.length === 1 ? "" : "s"} proposed. ${reason}`,
-      });
+      };
+      const approval = await createApproval(approvalData);
+      apiCreateApproval(approvalData).catch((err) =>
+        console.debug("API schedule approval fallback:", err.message)
+      );
 
       setProposal({ ...result, approvalId: approval.id, input: nextInput });
       window.dispatchEvent(new CustomEvent("instituteos-approvals-changed"));
@@ -170,6 +176,7 @@ export default function SchedulesPage({ role, userId }) {
       decision,
       payload: { grid: proposal.grid, changes: proposal.changes },
     });
+    apiDecideApproval(proposal.approvalId, decision === "approve" ? "approved" : "rejected").catch(() => {});
 
     if (decision === "approve") {
       sound.chime();
@@ -177,6 +184,20 @@ export default function SchedulesPage({ role, userId }) {
       localStorage.setItem("instituteos_solved_schedule", JSON.stringify(proposal.grid));
       setStatus("Approved timetable plan saved locally.");
       toast.success("Schedule Approved", "New clash-free timetable is now active across all rooms.");
+
+      // Sync active session instances to backend timetable
+      if (Array.isArray(proposal.grid)) {
+        proposal.grid.slice(0, 12).forEach((slot) => {
+          if (slot.batch_id) {
+            apiCreateSession({
+              batch_id: slot.batch_id,
+              date: new Date().toISOString().slice(0, 10),
+              start: slot.start || "10:00",
+              end: slot.end || "12:00",
+            }).catch(() => {});
+          }
+        });
+      }
     } else {
       sound.tick();
       setStatus("Proposed timetable changes were rejected; saved timetable is unchanged.");
@@ -186,6 +207,7 @@ export default function SchedulesPage({ role, userId }) {
     setProposal(null);
     window.dispatchEvent(new CustomEvent("instituteos-approvals-changed"));
   }
+
 
   const trainerOptions = role === "trainer" ? input.trainers : trainers;
 
