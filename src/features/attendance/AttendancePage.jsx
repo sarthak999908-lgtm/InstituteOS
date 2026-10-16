@@ -2,7 +2,9 @@ import { useState } from "react";
 import { ClipboardCheck, Download, Users } from "lucide-react";
 import { attendance as seedAttendance, batches, sessions, students, trainers, users } from "../../data/mockData.js";
 import { createApproval } from "../../lib/database.js";
+import { markAttendance, createApproval as apiCreateApproval } from "../../services/api.js";
 import "./attendance.css";
+
 
 function initialRecords() {
   try {
@@ -78,6 +80,9 @@ export default function AttendancePage({ role, userId }) {
       localStorage.setItem("instituteos_attendance", JSON.stringify(next));
       return next;
     });
+    markAttendance(sessionId, [{ student_id: student.id, status: status.toLowerCase() }]).catch((err) =>
+      console.debug("Backend attendance mark fallback:", err.message)
+    );
     setNotice(`${student.name} marked ${status.toLowerCase()}.`);
   }
 
@@ -87,7 +92,17 @@ export default function AttendancePage({ role, userId }) {
       return;
     }
     if (role === "trainer") {
-      await createApproval({ role, userId, kind: "attendance_mark", payload: { sessionId, studentId: student.id, status }, preview: `Request to mark ${student.name} ${status.toLowerCase()} for ${batch.name}.` });
+      const approvalData = {
+        role,
+        userId,
+        kind: "attendance_mark",
+        payload: { sessionId, studentId: student.id, status },
+        preview: `Request to mark ${student.name} ${status.toLowerCase()} for ${batch.name}.`,
+      };
+      await createApproval(approvalData);
+      apiCreateApproval(approvalData).catch((err) =>
+        console.debug("Backend approval sync fallback:", err.message)
+      );
       window.dispatchEvent(new CustomEvent("instituteos-approvals-changed"));
       setNotice(`Attendance change for ${student.name} sent for owner approval.`);
     }
@@ -95,10 +110,21 @@ export default function AttendancePage({ role, userId }) {
 
   async function bulkMark(status) {
     if (!roster.length) return;
-    await createApproval({ role, userId, kind: "attendance_bulk_mark", payload: { sessionId, batchId: batch.id, status, studentIds: roster.map((student) => student.id) }, preview: `Bulk mark ${roster.length} ${batch.name} students ${status.toLowerCase()} for ${session.date}.` });
+    const approvalData = {
+      role,
+      userId,
+      kind: "attendance_bulk_mark",
+      payload: { sessionId, batchId: batch.id, status, studentIds: roster.map((student) => student.id) },
+      preview: `Bulk mark ${roster.length} ${batch.name} students ${status.toLowerCase()} for ${session.date}.`,
+    };
+    await createApproval(approvalData);
+    apiCreateApproval(approvalData).catch((err) =>
+      console.debug("Backend bulk approval sync fallback:", err.message)
+    );
     window.dispatchEvent(new CustomEvent("instituteos-approvals-changed"));
     setNotice(`Bulk ${status.toLowerCase()} request is waiting for approval.`);
   }
+
 
   return <div className="module-page"><div className="module-heading"><div><div className="eyebrow"><span className="eyebrow-line" />DAILY OPERATIONS</div><h1>Attendance</h1><p className="subtitle">Classroom check-ins and online join logs by session.</p></div><span className="module-icon"><ClipboardCheck size={23} /></span></div>
     <section className="stats-grid compact-stats">{[["Present", totals.present, "green"], ["Absent", totals.absent, "red"], ["Late", totals.late, "orange"], ["Attendance", `${rate}%`, "blue"]].map(([label, value, color]) => <article className="mini-stat panel" key={label}><span>{label}</span><strong className={color}>{value}</strong></article>)}</section>

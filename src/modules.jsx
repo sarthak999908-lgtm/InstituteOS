@@ -7,6 +7,8 @@ import { INITIAL_STUDENTS } from "./data.js";
 import { batches as instituteBatches, courses, feePlans, instalments, rooms, students as instituteStudents, trainers, users } from "./data/mockData.js";
 import ReconciliationPanel from "./features/fees/ReconciliationPanel.jsx";
 import FeeReceiptModal from "./features/fees/FeeReceiptModal.jsx";
+import { recordFeePayment, createBatch } from "./services/api.js";
+
 
 const seedBatches = instituteBatches.map((batch) => ({
   id: batch.id,
@@ -100,10 +102,24 @@ function CrudPage({ title, description, icon, storageKey, initial, fields, colum
       return;
     }
     setFormError("");
-    if (editing) setRecords((current) => current.map((record) => record.id === editing.id ? { ...record, ...values } : record));
-    else setRecords((current) => [{ ...values, id: `${singular.slice(0, 3).toUpperCase()}-${Date.now()}` }, ...current]);
+    if (editing) {
+      setRecords((current) => current.map((record) => record.id === editing.id ? { ...record, ...values } : record));
+    } else {
+      const newId = `${singular.slice(0, 3).toUpperCase()}-${Date.now()}`;
+      setRecords((current) => [{ ...values, id: newId }, ...current]);
+      if (storageKey === "instituteos_batches") {
+        createBatch({
+          id: newId,
+          name: values.name,
+          course_name: values.course,
+          trainer_name: values.instructor,
+          start_date: localDateString(),
+        }).catch((err) => console.debug("API createBatch fallback:", err.message));
+      }
+    }
     setShowForm(false); setEditing(null);
   }
+
   function remove(record) { if (window.confirm(`Delete this ${singular.toLowerCase()}?`)) setRecords((current) => current.filter((item) => item.id !== record.id)); }
   return <div className="module-page"><PageTitle icon={icon} title={title} description={description} action={<button className="primary-button" onClick={() => { setEditing(null); setFormError(""); setShowForm(true); }}><Plus size={16} /> Add {singular}</button>} />{summary?.(records)}<section className="panel record-panel"><div className="record-toolbar"><div><h2>{title} directory</h2><p>Changes are stored locally in this browser.</p></div><div className="record-toolbar-controls"><label className="record-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${title.toLowerCase()}…`} aria-label={`Search ${title}`} /></label>{filters && <select className="record-filter" value={filterValue} onChange={(event) => setFilterValue(event.target.value)} aria-label={`Filter ${title}`}>{filters.map((filter) => <option key={filter}>{filter}</option>)}</select>}</div></div>{showForm && <RecordForm title={`${editing ? "Edit" : "Add"} ${singular}`} fields={fields} initial={editing || empty} onSave={save} error={formError} onCancel={() => { setEditing(null); setFormError(""); setShowForm(false); }} />}<RecordTable columns={columns} rows={filtered} onEdit={(record) => { setEditing(record); setFormError(""); setShowForm(true); }} onDelete={remove} onExtra={onExtra ? (record) => onExtra(record, setRecords) : undefined} extraLabel={onExtra?.label} emptyText={query || filterValue !== "All" ? "No matching records. Try another search or filter." : `No ${title.toLowerCase()} yet. Add one to get started.`} /></section><p className="student-storage-note"><CheckCircle2 size={15} /> Demo records and changes are saved locally in this browser.</p></div>;
 }
@@ -219,6 +235,11 @@ export function FeesPage({ role = "owner", userId = "USR-OWNER" }) {
       return;
     }
     payment.update((current) => current.map((item) => item.id === payment.record.id ? { ...item, paid: Number(item.paid) + amount } : item));
+    recordFeePayment({
+      studentId: payment.record.studentId,
+      amount,
+      method: "bank_transfer",
+    }).catch((err) => console.debug("API recordFeePayment fallback:", err.message));
     try {
       const payments = JSON.parse(localStorage.getItem("instituteos_payments") || "[]");
       localStorage.setItem("instituteos_payments", JSON.stringify([...(Array.isArray(payments) ? payments : []), makePaymentEntry(payment.record, amount)]));
@@ -227,6 +248,7 @@ export function FeesPage({ role = "owner", userId = "USR-OWNER" }) {
     }
     setPayment(null);
   };
+
   recordPayment.label = "Record payment";
   return (
     <>
