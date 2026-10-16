@@ -254,6 +254,73 @@ app.get("/api/auth/session", requireAuth, (req, res) => {
 
 // Root & API discovery endpoint
 app.get(["/", "/api"], (req, res) => {
+  const isHtml = req.headers.accept && req.headers.accept.includes("text/html");
+
+  if (isHtml) {
+    return res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>InstituteOS · Backend REST API</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; background: #090d16; color: #f8fafc; display: flex; align-items: center; justify-content: center; min-height: 100vh; padding: 24px; }
+    .card { max-width: 620px; width: 100%; background: #111827; border: 1px solid #1f293d; border-radius: 20px; padding: 36px; box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.5); text-align: center; }
+    .status-badge { display: inline-flex; align-items: center; gap: 8px; padding: 6px 14px; border-radius: 999px; background: rgba(16, 185, 129, 0.12); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.25); font-size: 13px; font-weight: 600; margin-bottom: 20px; }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: #10b981; box-shadow: 0 0 10px #10b981; animation: pulse 2s infinite; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+    h1 { font-size: 28px; font-weight: 800; letter-spacing: -0.02em; margin-bottom: 10px; }
+    p { color: #94a3b8; font-size: 15px; line-height: 1.6; margin-bottom: 28px; }
+    .cta-button { display: inline-flex; align-items: center; justify-content: center; gap: 10px; width: 100%; padding: 14px 24px; border-radius: 12px; background: #2563eb; color: #ffffff; text-decoration: none; font-size: 16px; font-weight: 700; transition: background 0.2s, transform 0.1s; box-shadow: 0 8px 24px -4px rgba(37, 99, 235, 0.5); }
+    .cta-button:hover { background: #1d4ed8; transform: translateY(-1px); }
+    .meta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 24px 0; text-align: left; }
+    .meta-item { background: #1e293b; padding: 12px 16px; border-radius: 10px; border: 1px solid #334155; }
+    .meta-label { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: #94a3b8; margin-bottom: 4px; }
+    .meta-val { font-size: 14px; font-weight: 600; color: #f8fafc; font-family: monospace; }
+    .endpoints-box { background: #0b1120; border: 1px solid #1e293b; border-radius: 12px; padding: 14px 18px; text-align: left; margin-top: 20px; }
+    .endpoints-title { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.05em; color: #64748b; margin-bottom: 8px; }
+    .endpoint-tags { display: flex; flex-wrap: wrap; gap: 6px; }
+    .tag { font-family: monospace; font-size: 11px; background: #1e293b; color: #38bdf8; padding: 4px 8px; border-radius: 6px; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <div class="status-badge"><span class="dot"></span> Backend REST API Healthy</div>
+    <h1>InstituteOS Core Server</h1>
+    <p>The backend REST API is up and running on port 5000. Open the interactive web application below to log in as Admin or access student operations.</p>
+    <a href="http://localhost:5173" class="cta-button">🚀 Open InstituteOS Web App & Admin Portal</a>
+    <div class="meta-grid">
+      <div class="meta-item">
+        <div class="meta-label">Port & Status</div>
+        <div class="meta-val">5000 · Healthy</div>
+      </div>
+      <div class="meta-item">
+        <div class="meta-label">Frontend URL</div>
+        <div class="meta-val">http://localhost:5173</div>
+      </div>
+    </div>
+    <div class="endpoints-box">
+      <div class="endpoints-title">Active REST Endpoints</div>
+      <div class="endpoint-tags">
+        <span class="tag">/api/health</span>
+        <span class="tag">/api/auth/magic-link</span>
+        <span class="tag">/api/auth/verify-otp</span>
+        <span class="tag">/api/auth/signin</span>
+        <span class="tag">/api/dashboard</span>
+        <span class="tag">/api/students</span>
+        <span class="tag">/api/batches</span>
+        <span class="tag">/api/fees</span>
+        <span class="tag">/api/attendance</span>
+        <span class="tag">/api/schedules</span>
+        <span class="tag">/api/system/status</span>
+      </div>
+    </div>
+  </div>
+</body>
+</html>`);
+  }
+
   res.json({
     success: true,
     service: "InstituteOS Backend REST API",
@@ -264,6 +331,9 @@ app.get(["/", "/api"], (req, res) => {
     timestamp: new Date().toISOString(),
     endpoints: [
       "/api/health",
+      "/api/auth/magic-link",
+      "/api/auth/verify-otp",
+      "/api/auth/signin",
       "/api/dashboard",
       "/api/students",
       "/api/batches",
