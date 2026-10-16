@@ -169,3 +169,83 @@ export async function updateUserProfile(profileData) {
 export async function getAuditLog(limit = 50) {
   return apiFetch(`/audit-log?limit=${limit}`);
 }
+
+export async function logAuditEvent(action, tableName, recordId, details = {}) {
+  return apiFetch("/audit-log", {
+    method: "POST",
+    body: JSON.stringify({ action, table_name: tableName, record_id: recordId, details }),
+  });
+}
+
+// ── 10. Assignments & Submissions ────────────────────────────────────────────
+export async function getAssignments(batchId) {
+  const query = batchId ? `?batch_id=${encodeURIComponent(batchId)}` : "";
+  return apiFetch(`/assignments${query}`);
+}
+
+export async function createAssignment(assignmentData) {
+  return apiFetch("/assignments", {
+    method: "POST",
+    body: JSON.stringify(assignmentData),
+  });
+}
+
+export async function getSubmissions(filters = {}) {
+  const query = new URLSearchParams(filters).toString();
+  return apiFetch(`/submissions${query ? `?${query}` : ""}`);
+}
+
+export async function submitAssignment(submissionData) {
+  return apiFetch("/submissions", {
+    method: "POST",
+    body: JSON.stringify(submissionData),
+  });
+}
+
+// ── 11. Lecture Recordings ───────────────────────────────────────────────────
+export async function getRecordings(sessionId) {
+  const query = sessionId ? `?session_id=${encodeURIComponent(sessionId)}` : "";
+  return apiFetch(`/recordings${query}`);
+}
+
+export async function createRecording(recordingData) {
+  return apiFetch("/recordings", {
+    method: "POST",
+    body: JSON.stringify(recordingData),
+  });
+}
+
+// ── 12. Admin Resources ──────────────────────────────────────────────────────
+export async function createTrainer(trainerData) {
+  return apiFetch("/trainers", {
+    method: "POST",
+    body: JSON.stringify(trainerData),
+  });
+}
+
+export async function createCourse(courseData) {
+  return apiFetch("/courses", {
+    method: "POST",
+    body: JSON.stringify(courseData),
+  });
+}
+
+export async function createRoom(roomData) {
+  return apiFetch("/rooms", {
+    method: "POST",
+    body: JSON.stringify(roomData),
+  });
+}
+
+// ── 13. Copilot Backend Gateway ──────────────────────────────────────────────
+export async function queryCopilotBackend(prompt, intent) {
+  return apiFetch("/copilot/query", {
+    method: "POST",
+    body: JSON.stringify({ prompt, intent }),
+  });
+}
+
+// ── 14. System Status & Diagnostics ──────────────────────────────────────────
+export async function getSystemStatus() {
+  return apiFetch("/system/status");
+}

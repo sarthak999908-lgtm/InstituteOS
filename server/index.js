@@ -567,6 +567,325 @@ app.patch("/api/approvals/:id", requireAuth, requireRole("owner"), async (req, r
   }
 });
 
+// 14. Assignments & Submissions
+app.get("/api/assignments", async (req, res) => {
+  if (supabase) {
+    try {
+      let query = supabase.from("assignments").select(`
+        id, batch_id, title, due_date, max_score, created_at,
+        batches ( id, name, course_name )
+      `).order("due_date", { ascending: true });
+
+      if (req.query.batch_id) query = query.eq("batch_id", req.query.batch_id);
+      const { data, error } = await query;
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase assignments error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+app.post("/api/assignments", requireAuth, requireRole("owner", "trainer"), async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, batch_id, title, due_date, max_score } = req.body;
+  if (!batch_id || !title || !due_date) {
+    return res.status(400).json({ success: false, error: "batch_id, title, and due_date are required" });
+  }
+
+  try {
+    const assignmentId = id || `ASN-${Date.now().toString().slice(-6)}`;
+    const { data, error } = await supabase.from("assignments").upsert({
+      id: assignmentId,
+      batch_id,
+      title,
+      due_date,
+      max_score: Number(max_score) || 100,
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.get("/api/submissions", async (req, res) => {
+  if (supabase) {
+    try {
+      let query = supabase.from("submissions").select(`
+        id, assignment_id, student_id, score, status, submitted_at,
+        students ( id, name ),
+        assignments ( id, title, batch_id, max_score )
+      `).order("submitted_at", { ascending: false });
+
+      if (req.query.assignment_id) query = query.eq("assignment_id", req.query.assignment_id);
+      if (req.query.student_id) query = query.eq("student_id", req.query.student_id);
+
+      const { data, error } = await query;
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase submissions error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+app.post("/api/submissions", requireAuth, async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, assignment_id, student_id, score, status } = req.body;
+  if (!assignment_id || !student_id) {
+    return res.status(400).json({ success: false, error: "assignment_id and student_id are required" });
+  }
+
+  try {
+    const submissionId = id || `SUB-${Date.now().toString().slice(-6)}`;
+    const { data, error } = await supabase.from("submissions").upsert({
+      id: submissionId,
+      assignment_id,
+      student_id,
+      score: score !== undefined ? Number(score) : null,
+      status: status || "graded",
+      submitted_at: new Date().toISOString(),
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 15. Lecture Recordings
+app.get("/api/recordings", async (req, res) => {
+  if (supabase) {
+    try {
+      let query = supabase.from("recordings").select(`
+        id, session_id, url, duration_min, created_at,
+        sessions ( id, batch_id, date, start, "end" )
+      `).order("created_at", { ascending: false });
+
+      if (req.query.session_id) query = query.eq("session_id", req.query.session_id);
+      const { data, error } = await query;
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase recordings error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+app.post("/api/recordings", requireAuth, requireRole("owner", "trainer"), async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, session_id, url, duration_min } = req.body;
+  if (!session_id || !url) {
+    return res.status(400).json({ success: false, error: "session_id and url are required" });
+  }
+
+  try {
+    const recordingId = id || `REC-${Date.now().toString().slice(-6)}`;
+    const { data, error } = await supabase.from("recordings").upsert({
+      id: recordingId,
+      session_id,
+      url,
+      duration_min: Number(duration_min) || 60,
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 16. Admin Resources (Trainers, Courses, Rooms)
+app.post("/api/trainers", requireAuth, requireRole("owner"), async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, name, email, phone, specialization, status } = req.body;
+  if (!name) return res.status(400).json({ success: false, error: "Trainer name is required" });
+
+  try {
+    const trainerId = id || `TRN-${Date.now().toString().slice(-4)}`;
+    const { data, error } = await supabase.from("trainers").upsert({
+      id: trainerId,
+      name,
+      email: email || "",
+      phone: phone || "",
+      specialization: specialization || "General",
+      status: status || "active",
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/courses", requireAuth, requireRole("owner"), async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, name, code, track, duration_weeks, fee_default } = req.body;
+  if (!name) return res.status(400).json({ success: false, error: "Course name is required" });
+
+  try {
+    const courseId = id || `CRS-${Date.now().toString().slice(-4)}`;
+    const { data, error } = await supabase.from("courses").upsert({
+      id: courseId,
+      name,
+      code: code || name.slice(0, 3).toUpperCase(),
+      track: track || "Technical",
+      duration_weeks: Number(duration_weeks) || 12,
+      fee_default: Number(fee_default) || 45000,
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.post("/api/rooms", requireAuth, requireRole("owner"), async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, name, capacity } = req.body;
+  if (!name) return res.status(400).json({ success: false, error: "Room name is required" });
+
+  try {
+    const roomId = id || `RM-${Date.now().toString().slice(-4)}`;
+    const { data, error } = await supabase.from("rooms").upsert({
+      id: roomId,
+      name,
+      capacity: Number(capacity) || 30,
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 17. Audit Log Recording
+app.post("/api/audit-log", requireAuth, async (req, res) => {
+  const { action, table_name, record_id, details } = req.body;
+  const auditId = `AUD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+
+  if (supabase) {
+    try {
+      await supabase.from("audit_log").insert({
+        id: auditId,
+        actor_id: req.user?.id || "unknown",
+        actor_role: req.role || "unknown",
+        action: action || "general_action",
+        table_name: table_name || "system",
+        record_id: record_id || "",
+        details: details || {},
+        ts: new Date().toISOString(),
+      });
+    } catch (err) {
+      console.warn("Supabase audit log insert error:", err.message);
+    }
+  }
+
+  res.json({ success: true, message: "Audit event recorded", id: auditId });
+});
+
+// 18. AI Copilot Execution Gateway
+app.post("/api/copilot/query", requireAuth, async (req, res) => {
+  const { prompt, intent } = req.body;
+  const userRole = req.role || "counselor";
+
+  // Enforce role permission boundaries on backend
+  const blockedFinanceRoles = ["trainer"];
+  const isFinance = intent?.includes("fee") || intent?.includes("emi") || prompt?.toLowerCase().includes("fee") || prompt?.toLowerCase().includes("emi");
+
+  if (isFinance && blockedFinanceRoles.includes(userRole)) {
+    return res.status(403).json({
+      success: false,
+      error: "Financial queries are restricted from Trainer accounts under institute security policy.",
+    });
+  }
+
+  // Automatic audit logging
+  if (supabase) {
+    try {
+      await supabase.from("audit_log").insert({
+        id: `AUD-COPILOT-${Date.now()}`,
+        actor_id: req.user?.id || "demo",
+        actor_role: userRole,
+        action: "copilot_query",
+        table_name: "copilot",
+        details: { prompt, intent },
+        ts: new Date().toISOString(),
+      });
+    } catch {}
+  }
+
+  res.json({
+    success: true,
+    data: {
+      prompt,
+      role: userRole,
+      status: "verified",
+      message: "Query verified and processed through role-scoped backend pipeline.",
+    },
+  });
+});
+
+// 19. System Status & Diagnostics
+app.get("/api/system/status", async (req, res) => {
+  const status = {
+    server: "healthy",
+    uptimeSeconds: Math.floor(process.uptime()),
+    nodeVersion: process.version,
+    timestamp: new Date().toISOString(),
+    supabase: {
+      connected: Boolean(supabase),
+      url: supabaseUrl ? `${supabaseUrl.slice(0, 15)}...` : "not configured",
+    },
+    tables: {},
+  };
+
+  if (supabase) {
+    try {
+      const tablesToCheck = ["users", "students", "batches", "courses", "trainers", "rooms", "instalments", "attendance"];
+      const counts = await Promise.all(
+        tablesToCheck.map(async (tbl) => {
+          try {
+            const { count, error } = await supabase.from(tbl).select("id", { count: "exact", head: true });
+            return [tbl, error ? "error" : count ?? 0];
+          } catch {
+            return [tbl, "unavailable"];
+          }
+        })
+      );
+      status.tables = Object.fromEntries(counts);
+    } catch (err) {
+      status.supabase.error = err.message;
+    }
+  }
+
+  res.json({ success: true, data: status });
+});
+
 if (process.env.NODE_ENV !== "test") {
   app.listen(PORT, () => {
     console.log(`InstituteOS API server running at http://localhost:${PORT}`);
