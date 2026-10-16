@@ -82,6 +82,37 @@ function requireRole(...allowedRoles) {
 
 
 
+// Root & API discovery endpoint
+app.get(["/", "/api"], (req, res) => {
+  res.json({
+    success: true,
+    service: "InstituteOS Backend REST API",
+    status: "healthy",
+    mode: supabase ? "supabase-live" : "local-mock",
+    supabaseConnected: Boolean(supabase),
+    frontendUrl: "http://localhost:5173",
+    timestamp: new Date().toISOString(),
+    endpoints: [
+      "/api/health",
+      "/api/dashboard",
+      "/api/students",
+      "/api/batches",
+      "/api/fees",
+      "/api/attendance",
+      "/api/trainers",
+      "/api/courses",
+      "/api/rooms",
+      "/api/sessions",
+      "/api/approvals",
+      "/api/assignments",
+      "/api/submissions",
+      "/api/recordings",
+      "/api/profile",
+      "/api/system/status",
+    ],
+  });
+});
+
 // 1. Health check & status
 app.get("/api/health", (req, res) => {
   res.json({
