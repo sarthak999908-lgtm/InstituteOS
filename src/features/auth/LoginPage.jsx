@@ -186,9 +186,8 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
     setAuthError("");
     const { user, error } = await signInWithEmail(email, password);
     setAuthLoading(false);
-    if (error) { setAuthError(error.message); return; }
-    // Read role from app_metadata
-    const userRole = user?.app_metadata?.role || "counselor";
+    if (error) { setAuthError(error.message || "Sign in failed"); return; }
+    const userRole = user?.role || user?.app_metadata?.role || ((email || "").toLowerCase().includes("owner") || (email || "").toLowerCase().includes("admin") ? "owner" : "counselor");
     onRoleChange(userRole);
     sound.chime();
     setExpandingRole(userRole);
@@ -202,14 +201,12 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
     setAuthError("");
     const { user, error } = await signUpWithEmail(email, password, signupRole, name);
     setAuthLoading(false);
-    if (error) { setAuthError(error.message); return; }
-    if (user?.identities?.length === 0) {
-      setAuthError("An account with this email already exists. Please sign in.");
-      return;
-    }
-    setAuthSuccess("Account created! Check your email to confirm, then sign in.");
-    setAuthTab("signin");
-    setPassword("");
+    if (error) { setAuthError(error.message || "Registration failed"); return; }
+    const userRole = user?.role || user?.app_metadata?.role || signupRole;
+    onRoleChange(userRole);
+    sound.chime();
+    setExpandingRole(userRole);
+    setTimeout(() => onLogin(user), 550);
   };
 
   // ── Email OTP (Magic Link) handlers ─────────────────────────────────────────
@@ -218,23 +215,25 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
     setAuthLoading(true);
     setAuthError("");
     setAuthSuccess("");
-    const { error } = await sendMagicLink(email);
+    const res = await sendMagicLink(email);
     setAuthLoading(false);
-    if (error) { setAuthError(error.message); return; }
+    if (res?.error) { setAuthError(res.error.message || "Could not send OTP"); return; }
     setOtpSent(true);
     setOtpEmail(email);
     sound.tick();
-    setAuthSuccess("Magic link sent! Check your inbox and click the link, or enter the 6-digit code below.");
+    const codeNotice = res?.otp ? ` (Verification code: ${res.otp})` : "";
+    setAuthSuccess(`Magic link & OTP code sent to ${email}!${codeNotice} Enter the code below or click verify.`);
+    if (res?.otp) setOtpCode(res.otp);
   };
 
   const handleVerifyOtp = async () => {
-    if (!otpCode || otpCode.length < 6) { setAuthError("Please enter the 6-digit code from your email."); return; }
+    if (!otpCode || otpCode.length < 6) { setAuthError("Please enter the 6-digit code."); return; }
     setAuthLoading(true);
     setAuthError("");
     const { user, error } = await verifyEmailOtp(otpEmail, otpCode.trim());
     setAuthLoading(false);
-    if (error) { setAuthError(error.message); return; }
-    const userRole = user?.app_metadata?.role || "counselor";
+    if (error) { setAuthError(error.message || "Verification failed"); return; }
+    const userRole = user?.role || user?.app_metadata?.role || ((otpEmail || "").toLowerCase().includes("owner") || (otpEmail || "").toLowerCase().includes("admin") ? "owner" : "counselor");
     onRoleChange(userRole);
     sound.chime();
     setExpandingRole(userRole);
@@ -244,11 +243,13 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
   const handleResendOtp = async () => {
     setAuthLoading(true);
     setAuthError("");
-    const { error } = await sendMagicLink(otpEmail);
+    const res = await sendMagicLink(otpEmail);
     setAuthLoading(false);
-    if (error) { setAuthError(error.message); return; }
+    if (res?.error) { setAuthError(res.error.message); return; }
     sound.tick();
-    setAuthSuccess("New magic link sent! Check your inbox.");
+    const codeNotice = res?.otp ? ` (Code: ${res.otp})` : "";
+    setAuthSuccess(`New code sent!${codeNotice} Check your inbox.`);
+    if (res?.otp) setOtpCode(res.otp);
   };
 
   const handleKeyDown = (e) => {
@@ -348,28 +349,24 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
         >
           {[
             { id: "demo", label: "Demo Mode" },
-            { id: "otp", label: "Email OTP", disabled: !supabaseEnabled },
-            { id: "signin", label: "Sign In", disabled: !supabaseEnabled },
-            { id: "signup", label: "Register", disabled: !supabaseEnabled },
-          ].map(({ id, label, disabled }) => (
+            { id: "otp", label: "Email OTP" },
+            { id: "signin", label: "Sign In" },
+            { id: "signup", label: "Register" },
+          ].map(({ id, label }) => (
             <button
               key={id}
-              onClick={() => { if (!disabled) { sound.tick(); setAuthTab(id); setAuthError(""); setAuthSuccess(""); if (id !== "otp") { setOtpSent(false); setOtpCode(""); } } }}
-              title={disabled ? "Configure Supabase credentials to enable real auth" : undefined}
+              onClick={() => { sound.tick(); setAuthTab(id); setAuthError(""); setAuthSuccess(""); if (id !== "otp") { setOtpSent(false); setOtpCode(""); } }}
               style={{
                 padding: "7px 18px", borderRadius: "var(--radius-sm)",
-                border: "none", cursor: disabled ? "not-allowed" : "pointer",
+                border: "none", cursor: "pointer",
                 background: authTab === id ? "var(--surface)" : "transparent",
                 boxShadow: authTab === id ? "var(--shadow-card)" : "none",
-                color: disabled ? "var(--text-muted)" : authTab === id ? "var(--text-primary)" : "var(--text-secondary)",
+                color: authTab === id ? "var(--text-primary)" : "var(--text-secondary)",
                 fontSize: "13px", fontWeight: 600, fontFamily: "inherit",
-                transition: "all 0.15s", opacity: disabled ? 0.5 : 1,
+                transition: "all 0.15s",
               }}
             >
               {label}
-              {id !== "demo" && !supabaseEnabled && (
-                <span style={{ marginLeft: 5, fontSize: 10, opacity: 0.6 }}>🔒</span>
-              )}
             </button>
           ))}
         </div>
@@ -506,6 +503,32 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                       onChange={setEmail}
                       icon={Mail}
                     />
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
+                      <span style={{ fontSize: "11px", color: "var(--text-muted)", width: "100%" }}>Quick email login:</span>
+                      {[
+                        { label: "Admin (Owner)", email: "admin@instituteos.app" },
+                        { label: "Counselor", email: "counselor@demo.instituteos.app" },
+                        { label: "Trainer", email: "trainer@demo.instituteos.app" },
+                        { label: "Accounts", email: "accounts@demo.instituteos.app" },
+                      ].map((item) => (
+                        <button
+                          key={item.email}
+                          type="button"
+                          onClick={() => { setEmail(item.email); sound.tick(); }}
+                          style={{
+                            fontSize: "11px",
+                            padding: "3px 8px",
+                            borderRadius: 6,
+                            background: "var(--surface-2)",
+                            border: "1px solid var(--border)",
+                            color: "var(--accent-primary)",
+                            cursor: "pointer",
+                          }}
+                        >
+                          {item.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 ) : (
                   /* Step 2: Enter 6-digit OTP code */
@@ -622,6 +645,32 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                       </button>
                     }
                   />
+                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
+                    <span style={{ fontSize: "11px", color: "var(--text-muted)", width: "100%" }}>Quick email login:</span>
+                    {[
+                      { label: "Admin (Owner)", email: "admin@instituteos.app" },
+                      { label: "Counselor", email: "counselor@demo.instituteos.app" },
+                      { label: "Trainer", email: "trainer@demo.instituteos.app" },
+                      { label: "Accounts", email: "accounts@demo.instituteos.app" },
+                    ].map((item) => (
+                      <button
+                        key={item.email}
+                        type="button"
+                        onClick={() => { setEmail(item.email); setPassword("admin123"); sound.tick(); }}
+                        style={{
+                          fontSize: "11px",
+                          padding: "3px 8px",
+                          borderRadius: 6,
+                          background: "var(--surface-2)",
+                          border: "1px solid var(--border)",
+                          color: "var(--accent-primary)",
+                          cursor: "pointer",
+                        }}
+                      >
+                        {item.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {authError && (

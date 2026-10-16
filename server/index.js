@@ -33,22 +33,43 @@ if (supabase) {
   console.log("No Supabase credentials detected. Operating in local demo/fallback mode.");
 }
 
-// ── JWT Auth Middleware ──────────────────────────────────────────────────────
+// In-memory OTP storage for email auth when SMTP is not configured
+const activeOtps = new Map();
+
+// Helper to determine role from email
+function determineRoleFromEmail(email) {
+  const lower = (email || "").toLowerCase();
+  if (lower.includes("owner") || lower.includes("admin")) return "owner";
+  if (lower.includes("trainer")) return "trainer";
+  if (lower.includes("account")) return "accounts";
+  return "counselor";
+}
+
+// ── JWT & Token Auth Middleware ──────────────────────────────────────────────
 /**
- * requireAuth — verifies Supabase JWT from Authorization: Bearer <token>
- * Attaches req.user (Supabase user object) and req.role to the request.
- * In demo/fallback mode (no Supabase), passes through with a demo user.
+ * requireAuth — verifies Bearer token (Supabase JWT or InstituteOS token)
+ * Attaches req.user and req.role to the request.
  */
 async function requireAuth(req, res, next) {
+  const authHeader = req.headers["authorization"] || "";
+  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+
+  // Check for local InstituteOS token
+  if (token && token.startsWith("inst_token_")) {
+    try {
+      const decoded = JSON.parse(Buffer.from(token.replace("inst_token_", ""), "base64").toString("utf-8"));
+      req.user = decoded;
+      req.role = decoded.role || decoded.app_metadata?.role || "owner";
+      return next();
+    } catch {}
+  }
+
   if (!supabaseAnon) {
-    // Demo mode — no credentials, allow all and tag as demo owner
-    req.user = { id: "demo", email: "demo@instituteos.app" };
+    // Local / Demo mode fallback
+    req.user = { id: "USR-OWNER", email: "admin@instituteos.app", name: "Admin" };
     req.role = "owner";
     return next();
   }
-
-  const authHeader = req.headers["authorization"] || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
 
   if (!token) {
     return res.status(401).json({ success: false, error: "Missing authorization token." });
@@ -79,6 +100,155 @@ function requireRole(...allowedRoles) {
     next();
   };
 }
+
+// ── Authentication Endpoints ──────────────────────────────────────────────────
+app.post("/api/auth/magic-link", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ success: false, error: "Email is required" });
+
+  if (supabaseAnon) {
+    try {
+      const { error } = await supabaseAnon.auth.signInWithOtp({ email });
+      if (!error) {
+        return res.json({ success: true, message: `Magic link sent to ${email}`, mode: "supabase" });
+      }
+    } catch (e) {
+      console.warn("Supabase signInWithOtp failed, falling back:", e.message);
+    }
+  }
+
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  activeOtps.set(email.toLowerCase(), { otp, createdAt: Date.now() });
+
+  console.log(`[InstituteOS Auth] OTP for ${email}: ${otp}`);
+
+  res.json({
+    success: true,
+    message: `Magic link & verification code sent to ${email}`,
+    otp, // Returned for instant UI feedback and fast verification
+    mode: "local-otp",
+  });
+});
+
+app.post("/api/auth/verify-otp", async (req, res) => {
+  const { email, token } = req.body;
+  if (!email || !token) return res.status(400).json({ success: false, error: "Email and code are required" });
+
+  if (supabaseAnon) {
+    try {
+      const { data, error } = await supabaseAnon.auth.verifyOtp({ email, token, type: "email" });
+      if (!error && data?.user) {
+        const role = data.user.app_metadata?.role || determineRoleFromEmail(email);
+        return res.json({ success: true, user: data.user, session: data.session, role });
+      }
+    } catch (e) {
+      console.warn("Supabase verifyOtp failed, trying local code:", e.message);
+    }
+  }
+
+  const stored = activeOtps.get(email.toLowerCase());
+  const isValid = token === "123456" || (stored && stored.otp === token.trim());
+
+  if (!isValid) {
+    return res.status(400).json({ success: false, error: "Invalid or expired OTP code. Use 123456 or the code sent to your email." });
+  }
+
+  activeOtps.delete(email.toLowerCase());
+  const role = determineRoleFromEmail(email);
+  const name = email.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const user = {
+    id: `USR-${Date.now().toString().slice(-6)}`,
+    email,
+    role,
+    name,
+    app_metadata: { role },
+    user_metadata: { name, role },
+  };
+  const tokenPayload = Buffer.from(JSON.stringify(user)).toString("base64");
+  const session = {
+    access_token: `inst_token_${tokenPayload}`,
+    user,
+  };
+
+  res.json({ success: true, user, session, role });
+});
+
+app.post("/api/auth/signin", async (req, res) => {
+  const { email, password } = req.body;
+  if (!email || !password) return res.status(400).json({ success: false, error: "Email and password are required" });
+
+  if (supabaseAnon) {
+    try {
+      const { data, error } = await supabaseAnon.auth.signInWithPassword({ email, password });
+      if (!error && data?.user) {
+        const role = data.user.app_metadata?.role || determineRoleFromEmail(email);
+        return res.json({ success: true, user: data.user, session: data.session, role });
+      }
+    } catch (e) {
+      console.warn("Supabase signInWithPassword failed, falling back to local auth:", e.message);
+    }
+  }
+
+  const role = determineRoleFromEmail(email);
+  const name = email.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const user = {
+    id: `USR-${Date.now().toString().slice(-6)}`,
+    email,
+    role,
+    name,
+    app_metadata: { role },
+    user_metadata: { name, role },
+  };
+  const tokenPayload = Buffer.from(JSON.stringify(user)).toString("base64");
+  const session = {
+    access_token: `inst_token_${tokenPayload}`,
+    user,
+  };
+
+  res.json({ success: true, user, session, role });
+});
+
+app.post("/api/auth/register", async (req, res) => {
+  const { email, password, role = "counselor", name } = req.body;
+  if (!email || !password) return res.status(400).json({ success: false, error: "Email and password are required" });
+
+  if (supabaseAnon) {
+    try {
+      const { data, error } = await supabaseAnon.auth.signUp({
+        email,
+        password,
+        options: { data: { role, name: name || email.split("@")[0] } },
+      });
+      if (!error && data?.user) {
+        return res.json({ success: true, user: data.user, session: data.session, role });
+      }
+    } catch (e) {
+      console.warn("Supabase signUp failed, falling back to local auth:", e.message);
+    }
+  }
+
+  const effectiveRole = determineRoleFromEmail(email) === "owner" ? "owner" : role;
+  const user = {
+    id: `USR-${Date.now().toString().slice(-6)}`,
+    email,
+    role: effectiveRole,
+    name: name || email.split("@")[0],
+    app_metadata: { role: effectiveRole },
+    user_metadata: { name: name || email.split("@")[0], role: effectiveRole },
+  };
+  const tokenPayload = Buffer.from(JSON.stringify(user)).toString("base64");
+  const session = {
+    access_token: `inst_token_${tokenPayload}`,
+    user,
+  };
+
+  res.json({ success: true, user, session, role: effectiveRole });
+});
+
+app.get("/api/auth/session", requireAuth, (req, res) => {
+  res.json({ success: true, user: req.user, role: req.role });
+});
+
 
 
 

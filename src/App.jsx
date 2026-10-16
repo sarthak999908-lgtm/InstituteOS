@@ -124,30 +124,31 @@ export default function App() {
     }
   }, [calmMode, prefersReducedMotion]);
 
-  // ── Supabase auth state ──────────────────────────────────────────────────────
+  // ── Auth session restore ───────────────────────────────────────────────────
   useEffect(() => {
-    if (!supabaseEnabled) return;
-
     // Check for an existing session on mount (handles page refresh)
     getSession().then(async (session) => {
       if (session?.user) {
         const profile = await getUserProfile(session.user.id);
-        const userRole = profile?.role || session.user.app_metadata?.role || "counselor";
+        const userRole = profile?.role || session.user.role || session.user.app_metadata?.role || "owner";
         setRole(userRole);
         setSignedIn(true);
       }
     });
 
+    if (!supabaseEnabled) return;
+
     // Subscribe to future auth events
     const unsub = onAuthStateChange(async (event, session) => {
       if (event === "SIGNED_IN" && session?.user) {
         const profile = await getUserProfile(session.user.id);
-        const userRole = profile?.role || session.user.app_metadata?.role || "counselor";
+        const userRole = profile?.role || session.user.role || session.user.app_metadata?.role || "counselor";
         setRole(userRole);
         setSignedIn(true);
       }
       if (event === "SIGNED_OUT") {
         try { localStorage.removeItem("instituteos_demo_session"); } catch {}
+        try { localStorage.removeItem("instituteos_session"); } catch {}
         setSignedIn(false);
         setActiveTab("Dashboard");
       }
@@ -285,13 +286,10 @@ export default function App() {
 
   const signOut = async () => {
     try { localStorage.removeItem("instituteos_demo_session"); } catch {}
-    if (supabaseEnabled) {
-      await supabaseSignOut();
-      // onAuthStateChange SIGNED_OUT will set signedIn=false
-    } else {
-      setSignedIn(false);
-      setActiveTab("Dashboard");
-    }
+    try { localStorage.removeItem("instituteos_session"); } catch {}
+    await supabaseSignOut();
+    setSignedIn(false);
+    setActiveTab("Dashboard");
   };
 
 
