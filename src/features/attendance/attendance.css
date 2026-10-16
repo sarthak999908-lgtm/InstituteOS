@@ -1,0 +1,25 @@
+.attendance-session-panel { margin-top: 14px; }
+.attendance-session-controls { display: flex; align-items: end; flex-wrap: wrap; gap: 10px; margin-bottom: 12px; }
+.attendance-session-controls label { display: grid; flex: 1 1 320px; gap: 6px; color: #bdb5d2; font-size: 10px; font-weight: 700; }
+.attendance-session-controls select { min-height: 39px; padding: 8px 10px; border: 1px solid rgba(177,151,255,.2); border-radius: 8px; color: #eee8ff; background: #100e20; }
+.attendance-session-controls > button { display: inline-flex; align-items: center; gap: 6px; min-height: 37px; }
+.attendance-notice { color: #78dfb5; font-size: 10px; }
+.attendance-columns { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 13px; }
+.attendance-mode-panel { min-width: 0; padding: 13px; border: 1px solid rgba(177,151,255,.13); border-radius: 9px; background: rgba(8,7,18,.28); }
+.attendance-mode-panel > header { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 8px; }
+.attendance-mode-panel h2 { margin: 0 0 3px; font-size: 14px; }
+.attendance-mode-panel header p { margin: 0; color: #8f87a8; font-size: 9px; }
+.mode-indicator { padding: 4px 6px; border-radius: 6px; color: #79dfd8; background: rgba(80,222,219,.09); font-size: 8px; font-weight: 800; }
+.attendance-detail-row { display: grid; grid-template-columns: minmax(80px,1fr) auto; align-items: center; gap: 7px; padding: 9px 0; border-top: 1px solid rgba(177,151,255,.1); }
+.attendance-detail-row > div:first-child { min-width: 0; }
+.attendance-detail-row > div:first-child strong, .attendance-detail-row > div:first-child small { display: block; overflow-wrap: anywhere; }
+.attendance-detail-row > div:first-child strong { color: #eee8ff; font-size: 10px; }
+.attendance-detail-row > div:first-child small { color: #8f87a8; font-size: 8px; }
+.attendance-detail-row > .record-badge { white-space: nowrap; }
+.attendance-mark-actions { display: flex; grid-column: 1 / -1; gap: 5px; }
+.attendance-mark-actions button { flex: 1; min-height: 29px; padding: 5px 6px; border: 1px solid rgba(177,151,255,.16); border-radius: 6px; color: #a9a1bf; background: #100e20; font-size: 8px; }
+.attendance-mark-actions button.selected { border-color: rgba(80,222,219,.4); color: #8ae4db; background: rgba(80,222,219,.07); }
+.attendance-bulk-actions { display: flex; align-items: center; justify-content: flex-end; flex-wrap: wrap; gap: 7px; margin-top: 13px; padding-top: 12px; border-top: 1px solid rgba(177,151,255,.12); }
+.attendance-bulk-actions > span { flex: 1; color: #9189a9; font-size: 9px; }
+.attendance-bulk-actions button { min-height: 32px; padding: 6px 8px; font-size: 9px; }
+@media (max-width: 760px) { .attendance-columns { grid-template-columns: 1fr; } }

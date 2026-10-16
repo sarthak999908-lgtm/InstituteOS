@@ -1,47 +1,10 @@
-export const INITIAL_STUDENTS = [
-  {
-    id: "STU001",
-    name: "Aarav Sharma",
-    email: "aarav@example.com",
-    phone: "9876543210",
-    course: "Full Stack Development",
-    batch: "Full Stack · Morning",
-    status: "Active",
-  },
-  {
-    id: "STU002",
-    name: "Ananya Patel",
-    email: "ananya@example.com",
-    phone: "9876543211",
-    course: "Data Science",
-    batch: "Data Science · Evening",
-    status: "Active",
-  },
-  {
-    id: "STU003",
-    name: "Rohan Verma",
-    email: "rohan@example.com",
-    phone: "9876543212",
-    course: "UI/UX Design",
-    batch: "Product Design · Weekend",
-    status: "Inactive",
-  },
-  {
-    id: "STU004",
-    name: "Priya Singh",
-    email: "priya@example.com",
-    phone: "9876543213",
-    course: "Full Stack Development",
-    batch: "Full Stack · Morning",
-    status: "Active",
-  },
-  {
-    id: "STU005",
-    name: "Ishaan Gupta",
-    email: "ishaan@example.com",
-    phone: "9876543214",
-    course: "Data Science",
-    batch: "Data Science · Evening",
-    status: "Pending",
-  },
-];
+import { courses, students } from "./data/mockData.js";
+
+const courseNames = new Map(courses.map((course) => [course.id, course.name]));
+
+export const INITIAL_STUDENTS = students.map((student) => ({
+  ...student,
+  course: courseNames.get(student.course_id) || "Unassigned course",
+  batch: student.batch_name,
+  status: student.status === "active" ? "Active" : "Inactive",
+}));

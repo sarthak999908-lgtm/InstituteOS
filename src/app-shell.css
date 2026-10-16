@@ -1,0 +1,8 @@
+.role-switcher { display: inline-flex; align-items: center; }
+.role-switcher select { min-height: 34px; max-width: 125px; padding: 0 9px; border: 1px solid rgba(177,151,255,.2); border-radius: 8px; color: #ddd6f2; background: #17142b; font-size: 10px; }
+.sponsor-label { color: #7fded9 !important; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0,0,0,0); white-space: nowrap; border: 0; }
+@media (max-width: 650px) {
+  .role-switcher select { max-width: 94px; padding: 0 5px; font-size: 9px; }
+  .topbar-right { gap: 6px; }
+}

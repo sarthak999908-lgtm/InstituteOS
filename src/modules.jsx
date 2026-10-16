@@ -1,20 +1,35 @@
 import { useEffect, useState } from "react";
 import {
   BookOpen, CalendarDays, Check, CheckCircle2, ClipboardCheck,
-  Pencil, Plus, Search, Trash2, Users, Wallet, X,
+  Pencil, Plus, Search, Trash2, Users, Wallet, X, Printer,
 } from "lucide-react";
 import { INITIAL_STUDENTS } from "./data.js";
+import { batches as instituteBatches, courses, feePlans, instalments, rooms, students as instituteStudents, trainers, users } from "./data/mockData.js";
+import ReconciliationPanel from "./features/fees/ReconciliationPanel.jsx";
+import FeeReceiptModal from "./features/fees/FeeReceiptModal.jsx";
 
-const seedBatches = [
-  { id: "BAT-101", name: "Full Stack · Morning", course: "Full Stack Development", instructor: "Neha Kapoor", students: 32, capacity: 40, schedule: "Mon · Wed · Fri, 9:00 AM", status: "Active" },
-  { id: "BAT-102", name: "Data Science · Evening", course: "Data Science", instructor: "Arjun Mehta", students: 27, capacity: 30, schedule: "Tue · Thu · Sat, 5:30 PM", status: "Active" },
-  { id: "BAT-103", name: "Product Design · Weekend", course: "UI/UX Design", instructor: "Mira Shah", students: 18, capacity: 24, schedule: "Sat · Sun, 10:00 AM", status: "Active" },
-];
-const seedFees = [
-  { id: "FEE-201", student: "Aarav Sharma", studentId: "STU001", total: 48000, paid: 32000, dueDate: "2026-11-01" },
-  { id: "FEE-202", student: "Ananya Patel", studentId: "STU002", total: 52000, paid: 52000, dueDate: "2026-10-05" },
-  { id: "FEE-203", student: "Rohan Verma", studentId: "STU003", total: 36000, paid: 12000, dueDate: "2026-09-25" },
-];
+const seedBatches = instituteBatches.map((batch) => ({
+  id: batch.id,
+  name: batch.name,
+  course: batch.course_name,
+  instructor: batch.trainer_name,
+  students: batch.student_count,
+  capacity: rooms.find((room) => room.id === batch.room_id)?.capacity || 30,
+  schedule: `${batch.slot_days} · ${batch.slot_start}-${batch.slot_end}`,
+  status: "Active",
+}));
+const seedFees = instituteStudents.map((student) => {
+  const plan = feePlans.find((item) => item.student_id === student.id);
+  const studentInstalments = instalments.filter((item) => item.student_id === student.id);
+  return {
+    id: `FEE-${student.id}`,
+    student: student.name,
+    studentId: student.id,
+    total: plan?.total || 0,
+    paid: studentInstalments.reduce((total, item) => total + Number(item.paid_amount || 0), 0),
+    dueDate: studentInstalments.find((item) => item.status !== "paid")?.due_date || localDateString(),
+  };
+});
 const seedSchedules = [
   { id: "SCH-301", date: "2026-10-17", time: "09:00", subject: "React fundamentals", batch: "Full Stack · Morning", instructor: "Neha Kapoor", classroom: "Lab 2" },
   { id: "SCH-302", date: "2026-10-17", time: "17:30", subject: "Python for analytics", batch: "Data Science · Evening", instructor: "Arjun Mehta", classroom: "Room 4" },
@@ -55,14 +70,14 @@ function RecordTable({ columns, rows, onEdit, onDelete, onExtra, extraLabel, emp
   return <div className="record-table-wrap"><table className="record-table"><thead><tr>{columns.map((column) => <th key={column.key}>{column.label}</th>)}<th>Actions</th></tr></thead><tbody>{rows.length ? rows.map((row) => <tr key={row.id}>{columns.map((column) => <td key={column.key}>{column.render ? column.render(row) : row[column.key]}</td>)}<td><div className="record-actions">{onExtra && <button aria-label={`${extraLabel} for ${row.student}`} title={extraLabel} onClick={() => onExtra(row)}><Wallet size={14} /></button>}<button aria-label={`Edit ${row.name || row.student || row.subject || "record"}`} title="Edit" onClick={() => onEdit(row)}><Pencil size={15} /></button><button className="danger-action" aria-label={`Delete ${row.name || row.student || row.subject || "record"}`} title="Delete" onClick={() => onDelete(row)}><Trash2 size={15} /></button></div></td></tr>) : <tr><td colSpan={columns.length + 1} className="record-empty"><span>{emptyText}</span></td></tr>}</tbody></table></div>;
 }
 
-function RecordForm({ title, fields, initial, onSave, onCancel }) {
+function RecordForm({ title, fields, initial, onSave, onCancel, error }) {
   const [values, setValues] = useState(initial);
   function submit(event) {
     event.preventDefault();
     const cleaned = Object.fromEntries(Object.entries(values).map(([key, value]) => [key, typeof value === "string" ? value.trim() : value]));
     onSave(cleaned);
   }
-  return <form className="record-form" onSubmit={submit}><div className="record-form-head"><h2>{title}</h2><button type="button" className="student-close-button" aria-label="Close form" onClick={onCancel}><X size={18} /></button></div><div className="record-form-grid">{fields.map((field) => <label key={field.key}>{field.label}{field.options ? <select required={field.required !== false} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}</select> : <input required={field.required !== false} type={field.type || "text"} min={field.min} max={field.max} step={field.step} value={values[field.key] ?? ""} placeholder={field.placeholder || ""} onChange={(event) => setValues({ ...values, [field.key]: field.type === "number" ? Number(event.target.value) : event.target.value })} />}</label>)}</div><div className="record-form-actions"><button type="button" className="student-secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit">Save record</button></div></form>;
+  return <form className="record-form" onSubmit={submit}><div className="record-form-head"><h2>{title}</h2><button type="button" className="student-close-button" aria-label="Close form" onClick={onCancel}><X size={18} /></button></div><div className="record-form-grid">{fields.map((field) => <label key={field.key}>{field.label}{field.options ? <select required={field.required !== false} value={values[field.key] ?? ""} onChange={(event) => setValues({ ...values, [field.key]: event.target.value })}>{field.options.map((option) => <option key={option} value={option}>{option}</option>)}</select> : <input required={field.required !== false} type={field.type || "text"} min={field.min} max={field.max} step={field.step} value={values[field.key] ?? ""} placeholder={field.placeholder || ""} onChange={(event) => setValues({ ...values, [field.key]: field.type === "number" ? Number(event.target.value) : event.target.value })} />}</label>)}</div>{error && <p className="record-form-error" role="alert">{error}</p>}<div className="record-form-actions"><button type="button" className="student-secondary-button" onClick={onCancel}>Cancel</button><button className="primary-button" type="submit">Save record</button></div></form>;
 }
 
 function CrudPage({ title, description, icon, storageKey, initial, fields, columns, searchable, singular, summary, filters, matchesFilter, onExtra }) {
@@ -71,24 +86,26 @@ function CrudPage({ title, description, icon, storageKey, initial, fields, colum
   const [filterValue, setFilterValue] = useState("All");
   const [editing, setEditing] = useState(null);
   const [showForm, setShowForm] = useState(false);
+  const [formError, setFormError] = useState("");
   const filtered = records.filter((record) => searchable.some((key) => String(record[key] ?? "").toLowerCase().includes(query.trim().toLowerCase())) && (!matchesFilter || filterValue === "All" || matchesFilter(record, filterValue)));
   const empty = Object.fromEntries(fields.map((field) => [field.key, field.defaultValue ?? ""]));
   function save(values) {
     const today = localDateString();
     if (fields.some((field) => field.key === "date") && values.date < today) {
-      window.alert("Choose today or a future date for this schedule.");
+      setFormError("Choose today or a future date for this schedule.");
       return;
     }
     if (fields.some((field) => field.key === "date") && values.time && records.some((record) => record.id !== editing?.id && record.date === values.date && record.time === values.time && record.batch === values.batch)) {
-      window.alert("This batch already has a class at that date and time.");
+      setFormError("This batch already has a class at that date and time.");
       return;
     }
+    setFormError("");
     if (editing) setRecords((current) => current.map((record) => record.id === editing.id ? { ...record, ...values } : record));
     else setRecords((current) => [{ ...values, id: `${singular.slice(0, 3).toUpperCase()}-${Date.now()}` }, ...current]);
     setShowForm(false); setEditing(null);
   }
   function remove(record) { if (window.confirm(`Delete this ${singular.toLowerCase()}?`)) setRecords((current) => current.filter((item) => item.id !== record.id)); }
-  return <div className="module-page"><PageTitle icon={icon} title={title} description={description} action={<button className="primary-button" onClick={() => { setEditing(null); setShowForm(true); }}><Plus size={16} /> Add {singular}</button>} />{summary?.(records)}<section className="panel record-panel"><div className="record-toolbar"><div><h2>{title} directory</h2><p>Changes are stored locally in this browser.</p></div><div className="record-toolbar-controls"><label className="record-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${title.toLowerCase()}…`} aria-label={`Search ${title}`} /></label>{filters && <select className="record-filter" value={filterValue} onChange={(event) => setFilterValue(event.target.value)} aria-label={`Filter ${title}`}>{filters.map((filter) => <option key={filter}>{filter}</option>)}</select>}</div></div>{showForm && <RecordForm title={`${editing ? "Edit" : "Add"} ${singular}`} fields={fields} initial={editing || empty} onSave={save} onCancel={() => { setEditing(null); setShowForm(false); }} />}<RecordTable columns={columns} rows={filtered} onEdit={(record) => { setEditing(record); setShowForm(true); }} onDelete={remove} onExtra={onExtra ? (record) => onExtra(record, setRecords) : undefined} extraLabel={onExtra?.label} emptyText={query || filterValue !== "All" ? "No matching records. Try another search or filter." : `No ${title.toLowerCase()} yet. Add one to get started.`} /></section><p className="student-storage-note"><CheckCircle2 size={15} /> Demo records and changes are saved locally in this browser.</p></div>;
+  return <div className="module-page"><PageTitle icon={icon} title={title} description={description} action={<button className="primary-button" onClick={() => { setEditing(null); setFormError(""); setShowForm(true); }}><Plus size={16} /> Add {singular}</button>} />{summary?.(records)}<section className="panel record-panel"><div className="record-toolbar"><div><h2>{title} directory</h2><p>Changes are stored locally in this browser.</p></div><div className="record-toolbar-controls"><label className="record-search"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`Search ${title.toLowerCase()}…`} aria-label={`Search ${title}`} /></label>{filters && <select className="record-filter" value={filterValue} onChange={(event) => setFilterValue(event.target.value)} aria-label={`Filter ${title}`}>{filters.map((filter) => <option key={filter}>{filter}</option>)}</select>}</div></div>{showForm && <RecordForm title={`${editing ? "Edit" : "Add"} ${singular}`} fields={fields} initial={editing || empty} onSave={save} error={formError} onCancel={() => { setEditing(null); setFormError(""); setShowForm(false); }} />}<RecordTable columns={columns} rows={filtered} onEdit={(record) => { setEditing(record); setFormError(""); setShowForm(true); }} onDelete={remove} onExtra={onExtra ? (record) => onExtra(record, setRecords) : undefined} extraLabel={onExtra?.label} emptyText={query || filterValue !== "All" ? "No matching records. Try another search or filter." : `No ${title.toLowerCase()} yet. Add one to get started.`} /></section><p className="student-storage-note"><CheckCircle2 size={15} /> Demo records and changes are saved locally in this browser.</p></div>;
 }
 
 export function BatchesPage() {
@@ -111,13 +128,20 @@ function loadStudentList() {
   return [];
 }
 
-export function AttendancePage() {
-  const [students] = useState(loadStudentList);
+export function AttendancePage({ role = "owner", userId = "USR-OWNER" }) {
+  const [allStudents] = useState(loadStudentList);
   const [batches] = useLocalRecords("instituteos_batches", seedBatches);
   const [records, setRecords] = useLocalRecords("instituteos_attendance", []);
-  const [batchId, setBatchId] = useState(batches[0]?.id || "");
+  const trainerUser = users.find((user) => user.id === userId);
+  const trainer = trainers.find((item) => item.name === trainerUser?.name);
+  const allowedBatchIds = new Set(instituteBatches.filter((batch) => batch.trainer_id === trainer?.id).map((batch) => batch.id));
+  const visibleBatches = role === "trainer" ? batches.filter((batch) => allowedBatchIds.has(batch.id)) : batches;
+  const students = role === "trainer"
+    ? allStudents.filter((student) => allowedBatchIds.has(instituteBatches.find((batch) => batch.name === student.batch)?.id))
+    : allStudents;
+  const [batchId, setBatchId] = useState(visibleBatches[0]?.id || "");
   const [date, setDate] = useState(localDateString());
-  const batch = batches.find((item) => item.id === batchId);
+  const batch = visibleBatches.find((item) => item.id === batchId);
   const batchStudents = students.filter((student) => !batch || !student.course || student.course === batch.course);
   const attendance = (studentId) => records.find((item) => item.studentId === studentId && item.batchId === batchId && item.date === date)?.status || "Unmarked";
   function mark(student, status) {
@@ -126,12 +150,47 @@ export function AttendancePage() {
   }
   const totals = batchStudents.reduce((sum, student) => { const status = attendance(student.id); if (status === "Present") sum.present++; if (status === "Absent") sum.absent++; if (status === "Late") sum.late++; return sum; }, { present: 0, absent: 0, late: 0 });
   const pct = totals.present + totals.absent + totals.late ? Math.round((totals.present + totals.late) / (totals.present + totals.absent + totals.late) * 100) : 0;
-  return <div className="module-page"><PageTitle icon={ClipboardCheck} title="Attendance" description="Record daily attendance by batch. Entries are stored on this device." /><section className="stats-grid compact-stats">{[["Present", totals.present, "green"], ["Absent", totals.absent, "red"], ["Late", totals.late, "orange"], ["Attendance", `${pct}%`, "purple"]].map(([label, value, color]) => <div className="mini-stat panel" key={label}><span>{label}</span><strong className={color}>{value}</strong></div>)}</section><section className="panel record-panel"><div className="attendance-filters"><label>Batch<select value={batchId} onChange={(event) => setBatchId(event.target.value)}>{batches.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label><span className="local-data-label">Local attendance</span></div>{batchStudents.length ? <div className="attendance-list">{batchStudents.map((student) => <div className="attendance-row" key={student.id}><div className="student-identity"><div className="student-avatar">{student.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</div><div className="student-identity-text"><strong>{student.name}</strong><span>{student.id} · {student.course || "Unassigned course"}</span></div></div><div className="attendance-options">{["Present", "Absent", "Late"].map((status) => <button key={status} className={`attendance-choice ${status.toLowerCase()} ${attendance(student.id) === status ? "selected" : ""}`} onClick={() => mark(student, status)} aria-pressed={attendance(student.id) === status}>{attendance(student.id) === status && <Check size={14} />}{status}</button>)}</div></div>)}</div> : <div className="record-empty attendance-empty"><Users size={26} /><strong>No students available</strong><span>Add student records first to take attendance.</span></div>}</section><p className="student-storage-note"><CheckCircle2 size={15} /> Attendance entries are demo data stored locally; they are not sent to the backend.</p></div>;
+  return <div className="module-page"><PageTitle icon={ClipboardCheck} title="Attendance" description="Record daily attendance by batch. Entries are stored on this device." /><section className="stats-grid compact-stats">{[["Present", totals.present, "green"], ["Absent", totals.absent, "red"], ["Late", totals.late, "orange"], ["Attendance", `${pct}%`, "blue"]].map(([label, value, color]) => <div className="mini-stat panel" key={label}><span>{label}</span><strong className={color}>{value}</strong></div>)}</section><section className="panel record-panel"><div className="attendance-filters"><label>Batch<select value={batchId} onChange={(event) => setBatchId(event.target.value)}>{batches.map((item) => <option key={item.id} value={item.id}>{item.name}</option>)}</select></label><label>Date<input type="date" value={date} onChange={(event) => setDate(event.target.value)} /></label><span className="local-data-label">Local attendance</span></div>{batchStudents.length ? <div className="attendance-list">{batchStudents.map((student) => <div className="attendance-row" key={student.id}><div className="student-identity"><div className="student-avatar">{student.name.split(" ").map((part) => part[0]).slice(0, 2).join("")}</div><div className="student-identity-text"><strong>{student.name}</strong><span>{student.id} · {student.course || "Unassigned course"}</span></div></div><div className="attendance-options">{["Present", "Absent", "Late"].map((status) => <button key={status} className={`attendance-choice ${status.toLowerCase()} ${attendance(student.id) === status ? "selected" : ""}`} onClick={() => mark(student, status)} aria-pressed={attendance(student.id) === status}>{attendance(student.id) === status && <Check size={14} />}{status}</button>)}</div></div>)}</div> : <div className="record-empty attendance-empty"><Users size={26} /><strong>No students available</strong><span>Add student records first to take attendance.</span></div>}</section><p className="student-storage-note"><CheckCircle2 size={15} /> Attendance entries are demo data stored locally; they are not sent to the backend.</p></div>;
 }
 
-export function FeesPage() {
+export function FeesPage({ role = "owner", userId = "USR-OWNER" }) {
+  const [payment, setPayment] = useState(null);
+  const [paymentAmount, setPaymentAmount] = useState("");
+  const [paymentError, setPaymentError] = useState("");
+  const [receiptRecord, setReceiptRecord] = useState(null);
   const fields = [{ key: "student", label: "Student name" }, { key: "studentId", label: "Student ID" }, { key: "total", label: "Total fees (₹)", type: "number", min: 0, defaultValue: 0 }, { key: "paid", label: "Amount paid (₹)", type: "number", min: 0, defaultValue: 0 }, { key: "dueDate", label: "Due date", type: "date" }];
-  const columns = [{ key: "student", label: "Student", render: (r) => <><strong>{r.student}</strong><small className="cell-subtitle">{r.studentId}</small></> }, { key: "total", label: "Total", render: (r) => money(r.total) }, { key: "paid", label: "Paid", render: (r) => money(r.paid) }, { key: "balance", label: "Balance", render: (r) => money(Math.max(0, Number(r.total) - Number(r.paid))) }, { key: "dueDate", label: "Due date" }, { key: "status", label: "Status", render: (r) => { const status = Number(r.paid) >= Number(r.total) ? "Paid" : r.dueDate < localDateString() ? "Overdue" : "Pending"; return <span className={`record-badge ${status.toLowerCase()}`}>{status}</span>; } }];
+  const columns = [
+    { key: "student", label: "Student", render: (r) => <><strong>{r.student}</strong><small className="cell-subtitle">{r.studentId}</small></> },
+    { key: "total", label: "Total", render: (r) => money(r.total) },
+    { key: "paid", label: "Paid", render: (r) => money(r.paid) },
+    { key: "balance", label: "Balance", render: (r) => money(Math.max(0, Number(r.total) - Number(r.paid))) },
+    { key: "dueDate", label: "Due date" },
+    { key: "status", label: "Status", render: (r) => { const status = Number(r.paid) >= Number(r.total) ? "Paid" : r.dueDate < localDateString() ? "Overdue" : "Pending"; return <span className={`record-badge ${status.toLowerCase()}`}>{status}</span>; } },
+    { key: "receipt", label: "Receipt", render: (r) => (
+      <button
+        type="button"
+        onClick={(e) => { e.stopPropagation(); setReceiptRecord(r); }}
+        className="receipt-btn"
+        style={{
+          display: "inline-flex",
+          alignItems: "center",
+          gap: 5,
+          padding: "4px 8px",
+          borderRadius: 6,
+          border: "1px solid var(--border)",
+          background: "var(--surface-2)",
+          color: "var(--accent-primary)",
+          fontSize: "11px",
+          fontWeight: 600,
+          cursor: "pointer",
+        }}
+        title="View printable receipt"
+      >
+        <Printer size={12} />
+        Receipt
+      </button>
+    )},
+  ];
   const summary = (records) => {
     const totals = records.reduce((sum, record) => {
       const balance = Math.max(0, Number(record.total) - Number(record.paid));
@@ -146,23 +205,80 @@ export function FeesPage() {
   const recordPayment = (record, update) => {
     const balance = Math.max(0, Number(record.total) - Number(record.paid));
     if (!balance) return;
-    const rawAmount = window.prompt(`Enter payment amount for ${record.student} (up to ${money(balance)}):`, String(balance));
-    if (rawAmount === null) return;
-    const amount = Number(rawAmount);
+    setPayment({ record, update });
+    setPaymentAmount(String(balance));
+    setPaymentError("");
+  };
+  function submitPayment(event) {
+    event.preventDefault();
+    if (!payment) return;
+    const amount = Number(paymentAmount);
+    const balance = Math.max(0, Number(payment.record.total) - Number(payment.record.paid));
     if (!Number.isFinite(amount) || amount <= 0 || amount > balance) {
-      if (!Number.isNaN(amount)) window.alert("Enter an amount greater than zero and no more than the remaining balance.");
+      setPaymentError(`Enter an amount greater than zero and no more than ${money(balance)}.`);
       return;
     }
-    update((current) => current.map((item) => item.id === record.id ? { ...item, paid: Number(item.paid) + amount } : item));
+    payment.update((current) => current.map((item) => item.id === payment.record.id ? { ...item, paid: Number(item.paid) + amount } : item));
     try {
       const payments = JSON.parse(localStorage.getItem("instituteos_payments") || "[]");
-      localStorage.setItem("instituteos_payments", JSON.stringify([...(Array.isArray(payments) ? payments : []), makePaymentEntry(record, amount)]));
+      localStorage.setItem("instituteos_payments", JSON.stringify([...(Array.isArray(payments) ? payments : []), makePaymentEntry(payment.record, amount)]));
     } catch (error) {
       console.error("Could not save local payment history:", error);
     }
+    setPayment(null);
   };
   recordPayment.label = "Record payment";
-  return <CrudPage title="Fees" description="Track fee balances and payment records. No payment processing is performed." icon={Wallet} storageKey="instituteos_fees" initial={seedFees} fields={fields} searchable={["id", "student", "studentId", "dueDate"]} singular="Fee record" filters={["All", "Paid", "Pending", "Overdue"]} matchesFilter={(record, filter) => statusFor(record) === filter} columns={columns} summary={summary} onExtra={recordPayment} />;
+  return (
+    <>
+      <CrudPage
+        title="Fees"
+        description="Track fee balances and payment records. No payment processing is performed."
+        icon={Wallet}
+        storageKey="instituteos_fees"
+        initial={seedFees}
+        fields={fields}
+        searchable={["id", "student", "studentId", "dueDate"]}
+        singular="Fee record"
+        filters={["All", "Paid", "Pending", "Overdue"]}
+        matchesFilter={(record, filter) => statusFor(record) === filter}
+        columns={columns}
+        summary={summary}
+        onExtra={recordPayment}
+      />
+      {(role === "owner" || role === "accounts") && <ReconciliationPanel role={role} userId={userId} />}
+      {payment && (
+        <div className="send-list-backdrop" role="presentation">
+          <form className="send-list-modal payment-entry-form" role="dialog" aria-modal="true" aria-labelledby="payment-entry-title" onSubmit={submitPayment}>
+            <div className="student-form-heading">
+              <div>
+                <span className="eyebrow">FEE LEDGER</span>
+                <h2 id="payment-entry-title">Record payment</h2>
+              </div>
+              <button type="button" className="student-close-button" aria-label="Close payment form" onClick={() => setPayment(null)}>
+                <X size={18} />
+              </button>
+            </div>
+            <p>{payment.record.student} · remaining balance {money(Math.max(0, Number(payment.record.total) - Number(payment.record.paid)))}</p>
+            <label>
+              Amount received (₹)
+              <input autoFocus required type="number" min="0.01" max={Math.max(0, Number(payment.record.total) - Number(payment.record.paid))} step="0.01" value={paymentAmount} onChange={(event) => setPaymentAmount(event.target.value)} />
+            </label>
+            {paymentError && <p className="record-form-error" role="alert">{paymentError}</p>}
+            <div className="record-form-actions">
+              <button type="button" className="student-secondary-button" onClick={() => setPayment(null)}>Cancel</button>
+              <button type="submit" className="primary-button">Save payment</button>
+            </div>
+          </form>
+        </div>
+      )}
+      {receiptRecord && (
+        <FeeReceiptModal
+          record={receiptRecord}
+          onClose={() => setReceiptRecord(null)}
+        />
+      )}
+    </>
+  );
 }
 
 function money(amount) { return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(Number(amount) || 0); }

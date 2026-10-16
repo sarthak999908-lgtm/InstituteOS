@@ -1,0 +1,44 @@
+.settings-section, .report-panel { margin-bottom: 16px; }
+.role-directory { display: grid; gap: 8px; }
+.role-user { display: flex; align-items: center; gap: 11px; min-width: 0; padding: 10px; border: 1px solid rgba(177,151,255,.12); border-radius: 9px; background: rgba(9,7,20,.3); }
+.role-user.selected { border-color: rgba(80,222,219,.3); background: rgba(80,222,219,.05); }
+.role-user .avatar { flex: 0 0 34px; }
+.role-user > div:nth-child(2) { flex: 1; min-width: 0; }
+.role-user > div:nth-child(2) strong, .role-user > div:nth-child(2) small { display: block; }
+.role-user > div:nth-child(2) strong { color: #eee8ff; font-size: 11px; }
+.role-user > div:nth-child(2) small { overflow: hidden; color: #9189a9; font-size: 9px; text-overflow: ellipsis; }
+.role-user > .student-secondary-button { display: inline-flex; align-items: center; justify-content: center; min-height: 32px; padding: 5px 9px; font-size: 9px; white-space: nowrap; }
+.current-user-line { margin: 12px 0 0; color: #9e96b7; font-size: 10px; }
+.motion-toggle { display: inline-flex; align-items: center; gap: 8px; color: #c5bddf; font-size: 11px; cursor: pointer; }
+.motion-toggle input { width: 16px; height: 16px; accent-color: #61d9d2; }
+:root[data-reduced-motion="true"] *, :root[data-reduced-motion="true"] *::before, :root[data-reduced-motion="true"] *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+.audit-filters { display: flex; flex-wrap: wrap; gap: 9px; margin: 0 0 14px; }
+.audit-search { flex: 1 1 220px; min-height: 40px; padding: 8px 11px; border: 1px solid rgba(177,151,255,.2); border-radius: 9px; color: #eee8ff; background: #100e20; }
+.audit-detail { max-width: 500px; overflow-wrap: anywhere; }
+.settings-section .record-toolbar-controls .student-secondary-button { display: inline-flex; align-items: center; gap: 6px; min-height: 34px; padding: 6px 9px; font-size: 10px; }
+.danger-zone { display: flex; align-items: center; flex-wrap: wrap; justify-content: space-between; gap: 12px; border-color: rgba(255,107,145,.2); }
+.danger-zone h2 { margin: 0 0 5px; font-size: 15px; }
+.danger-zone p { margin: 0; color: #a39bbd; font-size: 10px; }
+.danger-zone > button { display: inline-flex; align-items: center; gap: 6px; color: #ff9ab0; }
+.danger-zone > span { flex: 1 0 100%; color: #6ce0b2; font-size: 10px; }
+.report-status { padding: 12px 0; color: #a39bbd; font-size: 11px; }
+.report-status.error { color: #ff9ab0; }
+.record-icon-button { display: grid; place-items: center; width: 31px; height: 31px; border: 1px solid rgba(177,151,255,.2); border-radius: 8px; color: #c5bddf; background: #19152e; }
+.certificate-overlay { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; padding: 20px; background: rgba(5,4,12,.8); backdrop-filter: blur(7px); }
+.certificate-preview { width: min(100%, 800px); max-height: 90vh; overflow: auto; padding: 18px; border: 1px solid rgba(177,151,255,.2); border-radius: 12px; background: #151229; }
+.certificate-actions { display: flex; justify-content: flex-end; gap: 8px; margin-bottom: 14px; }
+.certificate-actions .primary-button { display: inline-flex; align-items: center; gap: 6px; }
+.certificate-paper { display: grid; justify-items: center; min-height: 440px; align-content: center; padding: 40px; border: 8px double #c5a9ff; color: #231b38; background: #fcfaff; text-align: center; }
+.certificate-paper > span { color: #67558d; font-size: 11px; font-weight: 800; letter-spacing: 2px; }
+.certificate-paper h2 { margin: 22px 0; color: #27183f; font-size: 30px; }
+.certificate-paper p { margin: 8px 0; color: #55486c; }
+.certificate-paper > strong { margin: 9px 0; color: #6848a7; font-family: 'Space Grotesk', sans-serif; font-size: 25px; }
+.certificate-paper > small { margin-top: 32px; color: #746888; }
+
+@media (max-width: 680px) {
+  .role-user { flex-wrap: wrap; }
+  .role-user > div:nth-child(2) { flex-basis: calc(100% - 60px); }
+  .role-user > .record-badge { margin-left: 45px; }
+  .certificate-paper { min-height: 370px; padding: 22px; }
+  .certificate-paper h2 { font-size: 23px; }
+}
