@@ -6,6 +6,8 @@ import {
 } from "lucide-react";
 import { decideApproval, listApprovals } from "../../lib/database.js";
 import { runCopilotMessage } from "../../services/copilot.js";
+import { queryCopilotBackend, decideApproval as apiDecideApproval } from "../../services/api.js";
+
 import GlassCard from "../../components/common/GlassCard.jsx";
 import MagneticButton from "../../components/common/MagneticButton.jsx";
 import Orb from "../../components/common/Orb.jsx";
@@ -330,6 +332,7 @@ function ActionPreview({ preview, role, userId }) {
         decision,
         payload: recipients,
       });
+      apiDecideApproval(preview.approvalId, decision === "approve" ? "approved" : "rejected").catch(() => {});
       setStatus(decision === "approve" ? "approved" : "rejected");
       window.dispatchEvent(new CustomEvent("instituteos-approvals-changed"));
       if (decision === "approve") {
@@ -340,6 +343,7 @@ function ActionPreview({ preview, role, userId }) {
     } finally {
       setWorking(false);
     }
+
   }
 
   return (
@@ -668,7 +672,11 @@ export default function CopilotPage({ role, userId }) {
       if (result.context) setContext(result.context);
       await refreshApprovals();
 
+      // Mirror query audit to backend remote logging pipeline
+      queryCopilotBackend(text, result?.intent || "copilot_query").catch(() => {});
+
       setTimeout(() => setOrbState("idle"), 2400);
+
     } catch (error) {
       clearInterval(stageInterval);
       setOrbState("refused");
