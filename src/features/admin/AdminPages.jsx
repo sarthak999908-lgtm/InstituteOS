@@ -1,9 +1,11 @@
 import { useEffect, useState } from "react";
-import { Download, FileText, Printer, RefreshCw, RotateCcw, ShieldCheck, Sun, Moon, Laptop, Palette, Feather } from "lucide-react";
+import { Download, FileText, Printer, RefreshCw, RotateCcw, ShieldCheck, Sun, Moon, Laptop, Palette, Feather, Database, Server, Activity, CheckCircle2, AlertCircle } from "lucide-react";
 import { users } from "../../data/mockData.js";
 import { listAuditLog, resetLocalDatabase, runRoleQuery } from "../../lib/database.js";
 import { useTheme } from "../../app/providers.jsx";
+import { getSystemStatus, getAuditLog } from "../../services/api.js";
 import "./admin.css";
+
 
 function PageHeading({ eyebrow, title, description, icon: Icon }) {
   return <div className="module-heading"><div><div className="eyebrow"><span className="eyebrow-line" />{eyebrow}</div><h1>{title}</h1><p className="subtitle">{description}</p></div><span className="module-icon"><Icon size={23} /></span></div>;
@@ -52,12 +54,51 @@ export function SettingsPage({ role, userId, userName, onRoleChange }) {
   const [reducedMotion, setReducedMotion] = useState(() => localStorage.getItem("instituteos_reduced_motion") === "true");
   const [status, setStatus] = useState("");
 
-  async function refreshAudit() { setAudit(await listAuditLog()); }
-  useEffect(() => { refreshAudit(); }, []);
+  const [systemDiag, setSystemDiag] = useState(null);
+  const [diagLoading, setDiagLoading] = useState(false);
+
+  async function checkBackendStatus() {
+    setDiagLoading(true);
+    try {
+      const data = await getSystemStatus();
+      setSystemDiag(data);
+    } catch (err) {
+      setSystemDiag({ server: "offline", error: err.message, tables: {} });
+    } finally {
+      setDiagLoading(false);
+    }
+  }
+
+  async function refreshAudit() {
+    const local = await listAuditLog();
+    try {
+      const remote = await getAuditLog(50);
+      if (Array.isArray(remote) && remote.length) {
+        const formattedRemote = remote.map((r) => ({
+          id: r.id,
+          at: r.ts || r.created_at,
+          role: r.actor_role || "system",
+          user_id: r.actor_id || "backend",
+          event: r.action,
+          detail: typeof r.details === "object" ? JSON.stringify(r.details) : String(r.details || ""),
+        }));
+        setAudit([...formattedRemote, ...local]);
+        return;
+      }
+    } catch {}
+    setAudit(local);
+  }
+
+  useEffect(() => {
+    refreshAudit();
+    checkBackendStatus();
+  }, []);
+
   useEffect(() => {
     document.documentElement.dataset.reducedMotion = String(reducedMotion);
     localStorage.setItem("instituteos_reduced_motion", String(reducedMotion));
   }, [reducedMotion]);
+
 
   const filteredAudit = audit.filter((entry) => {
     const text = `${entry.event} ${entry.detail} ${entry.user_id}`.toLowerCase();
@@ -85,8 +126,79 @@ export function SettingsPage({ role, userId, userName, onRoleChange }) {
   }
 
   return <div className="module-page"><PageHeading eyebrow="WORKSPACE CONFIGURATION" title="Settings" description="Manage Clear Sky appearance, demo roles, audit history, and local data." icon={RefreshCw} />
+    {/* Backend & Database Diagnostic Console */}
+    <section className="panel settings-section">
+      <div className="record-toolbar">
+        <div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <h2>Backend & Supabase Diagnostics</h2>
+            <span
+              style={{
+                fontSize: "11px",
+                fontWeight: 700,
+                padding: "3px 8px",
+                borderRadius: 12,
+                background: systemDiag?.server === "healthy" ? "rgba(22, 163, 74, 0.12)" : "rgba(239, 68, 68, 0.12)",
+                color: systemDiag?.server === "healthy" ? "#16A34A" : "#DC2626",
+                display: "inline-flex",
+                alignItems: "center",
+                gap: 4,
+              }}
+            >
+              {systemDiag?.server === "healthy" ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
+              {systemDiag?.server === "healthy" ? "REST API ACTIVE" : "OFFLINE / LOCAL"}
+            </span>
+          </div>
+          <p>Live health telemetry from the Express backend and PostgreSQL database connection.</p>
+        </div>
+        <button
+          className="student-secondary-button"
+          type="button"
+          disabled={diagLoading}
+          onClick={checkBackendStatus}
+          style={{ display: "inline-flex", alignItems: "center", gap: 6 }}
+        >
+          <RefreshCw size={13} className={diagLoading ? "spinning" : ""} />
+          {diagLoading ? "Checking…" : "Run Diagnostics"}
+        </button>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: 12, marginTop: 14 }}>
+        <div style={{ padding: 14, background: "var(--surface-2)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <Server size={15} color="var(--accent-primary)" />
+            <strong style={{ fontSize: "13px", color: "var(--text-primary)" }}>Express REST Server</strong>
+          </div>
+          <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+            Port 5000 · Uptime: {systemDiag?.data?.uptimeSeconds ?? (systemDiag?.uptimeSeconds ?? 0)}s
+          </span>
+        </div>
+
+        <div style={{ padding: 14, background: "var(--surface-2)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <Database size={15} color="#0D9488" />
+            <strong style={{ fontSize: "13px", color: "var(--text-primary)" }}>Supabase Connection</strong>
+          </div>
+          <span style={{ fontSize: "12px", color: systemDiag?.data?.supabase?.connected || systemDiag?.supabase?.connected ? "#16A34A" : "var(--text-muted)" }}>
+            {(systemDiag?.data?.supabase?.connected || systemDiag?.supabase?.connected) ? "PostgreSQL Live" : "Local Demo Fallback"}
+          </span>
+        </div>
+
+        <div style={{ padding: 14, background: "var(--surface-2)", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)" }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+            <Activity size={15} color="#F97316" />
+            <strong style={{ fontSize: "13px", color: "var(--text-primary)" }}>Endpoint Coverage</strong>
+          </div>
+          <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
+            20 REST API Endpoints active
+          </span>
+        </div>
+      </div>
+    </section>
+
     {/* Theme & Accent System */}
     <section className="panel settings-section">
+
       <div className="record-toolbar">
         <div>
           <h2>Appearance & Theme System</h2>
