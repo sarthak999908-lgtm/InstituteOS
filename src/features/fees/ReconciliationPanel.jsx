@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Check, FileUp, RotateCcw, X } from "lucide-react";
 import { dataSeed, students } from "../../data/mockData.js";
-import { createApproval, decideApproval } from "../../lib/database.js";
+import { createApproval, decideApproval } from "../../services/api.js";
 import { parseStatementCsv, reconcileStatement } from "./reconcile.js";
 import "./fees.css";
 
@@ -56,7 +56,7 @@ export default function ReconciliationPanel({ role, userId }) {
 
   async function decide(decision) {
     if (!pendingApproval) return;
-    await decideApproval({ approvalId: pendingApproval.id, role, userId, decision, payload: matched });
+    await decideApproval(pendingApproval.id, decision);
     if (decision === "approve") {
       const prior = JSON.parse(localStorage.getItem("instituteos_approved_reconciliations") || "[]");
       localStorage.setItem("instituteos_approved_reconciliations", JSON.stringify([...prior, ...matched]));
