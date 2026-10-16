@@ -12,6 +12,8 @@ import StudentDrawer from "../components/common/Drawer.jsx";
 import { INITIAL_STUDENTS } from "../data.js";
 import { sound } from "../lib/sound.js";
 import { toast } from "../components/common/Toast.jsx";
+import { getStudents, createStudent, deleteStudent } from "../services/api.js";
+
 
 function loadSavedStudents(role) {
   let saved = INITIAL_STUDENTS;
@@ -61,6 +63,36 @@ export default function StudentsPage({ role = "owner" }) {
       localStorage.setItem("instituteos_students", JSON.stringify(students));
     } catch {}
   }, [students, canManage]);
+
+  // Fetch live students from API on mount
+  useEffect(() => {
+    let active = true;
+    getStudents()
+      .then((data) => {
+        if (!active || !Array.isArray(data) || !data.length) return;
+        setStudents((prev) => {
+          const serverMap = new Map(data.map((s) => [s.id, {
+            id: s.id,
+            name: s.name,
+            email: s.email || "",
+            phone: s.phone || "",
+            course: s.course || "Full Stack Development",
+            batch: s.batch_name || s.batch || "Morning Batch",
+            status: s.status || "Active",
+          }]));
+          const merged = [...data.map((s) => serverMap.get(s.id))];
+          for (const item of prev) {
+            if (!serverMap.has(item.id)) merged.push(item);
+          }
+          return merged;
+        });
+      })
+      .catch((err) => {
+        console.debug("Live students fetch fallback:", err.message);
+      });
+    return () => { active = false; };
+  }, []);
+
 
   const handleSort = (field) => {
     sound.tick();
@@ -156,8 +188,12 @@ export default function StudentsPage({ role = "owner" }) {
     if (!form.name.trim()) return;
 
     if (editingStudent) {
+      const updated = { ...editingStudent, ...form };
       setStudents((curr) =>
-        curr.map((s) => (s.id === editingStudent.id ? { ...s, ...form } : s))
+        curr.map((s) => (s.id === editingStudent.id ? updated : s))
+      );
+      createStudent(updated).catch((err) =>
+        console.debug("API update fallback to local:", err.message)
       );
       toast.success("Student Updated", `${form.name} record was saved.`);
     } else {
@@ -166,6 +202,9 @@ export default function StudentsPage({ role = "owner" }) {
         id: `STU${Date.now().toString().slice(-6)}`,
       };
       setStudents((curr) => [newStu, ...curr]);
+      createStudent(newStu).catch((err) =>
+        console.debug("API create fallback to local:", err.message)
+      );
       toast.success("Student Enrolled", `${form.name} was added to the directory.`);
     }
 
@@ -186,10 +225,14 @@ export default function StudentsPage({ role = "owner" }) {
     e.stopPropagation();
     if (window.confirm(`Delete ${student.name} from directory?`)) {
       setStudents((curr) => curr.filter((s) => s.id !== student.id));
+      deleteStudent(student.id).catch((err) =>
+        console.debug("API delete fallback to local:", err.message)
+      );
       sound.tick();
       toast.info("Record Removed", `${student.name} was removed.`);
     }
   };
+
 
   return (
     <div className="module-page students-redesign" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
