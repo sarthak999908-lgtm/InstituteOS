@@ -197,7 +197,7 @@ app.delete("/api/students/:id", requireAuth, requireRole("owner", "counselor"), 
 app.get("/api/batches", async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase.from("batches").select("*");
+      const { data, error } = await supabase.from("batches").select("*").order("start_date", { ascending: false });
       if (!error) return res.json({ success: true, count: data.length, data });
     } catch (err) {
       console.error("Supabase batches error:", err);
@@ -205,6 +205,46 @@ app.get("/api/batches", async (req, res) => {
   }
   res.json({ success: true, count: 0, data: [] });
 });
+
+app.post("/api/batches", requireAuth, requireRole("owner", "counselor"), async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, name, course_id, course_name, trainer_id, trainer_name, mode, start_date, slot_days, slot_start, slot_end, room_id, online_seat_limit } = req.body;
+  if (!name || !start_date) {
+    return res.status(400).json({ success: false, error: "Batch name and start_date are required" });
+  }
+
+  try {
+    const batchId = id || `BAT-${Date.now().toString().slice(-5)}`;
+    const { data, error } = await supabase
+      .from("batches")
+      .upsert({
+        id: batchId,
+        name,
+        course_id: course_id || null,
+        course_name: course_name || "",
+        trainer_id: trainer_id || null,
+        trainer_name: trainer_name || "",
+        mode: mode || "classroom",
+        start_date,
+        slot_days: typeof slot_days === "object" ? JSON.stringify(slot_days) : (slot_days || "[1,3,5]"),
+        slot_start: slot_start || "10:00",
+        slot_end: slot_end || "12:00",
+        room_id: room_id || null,
+        online_seat_limit: Number(online_seat_limit) || 20,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
 
 // 5. Fees & Payments
 app.get("/api/fees", async (req, res) => {
@@ -390,6 +430,135 @@ app.put("/api/profile", requireAuth, async (req, res) => {
       .eq("id", req.user.id)
       .select()
       .single();
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 11. Rooms (for timetable scheduling and capacity check)
+app.get("/api/rooms", async (req, res) => {
+  if (supabase) {
+    try {
+      const { data, error } = await supabase.from("rooms").select("*").order("name", { ascending: true });
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase rooms error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+// 12. Sessions / Timetable
+app.get("/api/sessions", async (req, res) => {
+  if (supabase) {
+    try {
+      let query = supabase.from("sessions").select(`
+        id, batch_id, date, start, "end", created_at,
+        batches ( id, name, mode, room_id, course_name, trainer_name )
+      `).order("date", { ascending: true });
+
+      if (req.query.batch_id) query = query.eq("batch_id", req.query.batch_id);
+      if (req.query.start_date) query = query.gte("date", req.query.start_date);
+      if (req.query.end_date) query = query.lte("date", req.query.end_date);
+
+      const { data, error } = await query;
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase sessions error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+app.post("/api/sessions", requireAuth, requireRole("owner", "counselor", "trainer"), async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, batch_id, date, start, end } = req.body;
+  if (!batch_id || !date || !start || !end) {
+    return res.status(400).json({ success: false, error: "batch_id, date, start, and end are required" });
+  }
+
+  try {
+    const sessionId = id || `SES-${Date.now().toString().slice(-6)}`;
+    const { data, error } = await supabase.from("sessions").upsert({
+      id: sessionId,
+      batch_id,
+      date,
+      start,
+      end,
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// 13. Approvals Workflow
+app.get("/api/approvals", requireAuth, async (req, res) => {
+  if (supabase) {
+    try {
+      let query = supabase.from("approvals").select("*").order("created_at", { ascending: false });
+      if (req.query.status) query = query.eq("status", req.query.status);
+      const { data, error } = await query;
+      if (!error) return res.json({ success: true, count: data.length, data });
+    } catch (err) {
+      console.error("Supabase approvals error:", err);
+    }
+  }
+  res.json({ success: true, count: 0, data: [] });
+});
+
+app.post("/api/approvals", requireAuth, async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { id, kind, payload, preview } = req.body;
+  try {
+    const approvalId = id || `APP-${Date.now().toString().slice(-6)}`;
+    const { data, error } = await supabase.from("approvals").insert({
+      id: approvalId,
+      kind: kind || "general",
+      payload: payload || {},
+      preview: preview || "",
+      status: "pending",
+      requested_by: req.user?.id || null,
+    }).select().single();
+
+    if (error) throw error;
+    res.json({ success: true, data });
+  } catch (err) {
+    res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+app.patch("/api/approvals/:id", requireAuth, requireRole("owner"), async (req, res) => {
+  if (!supabase) {
+    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  }
+
+  const { status } = req.body;
+  if (!["approved", "rejected"].includes(status)) {
+    return res.status(400).json({ success: false, error: "status must be 'approved' or 'rejected'" });
+  }
+
+  try {
+    const { data, error } = await supabase.from("approvals")
+      .update({
+        status,
+        decided_by: req.user?.id || null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", req.params.id)
+      .select()
+      .single();
+
     if (error) throw error;
     res.json({ success: true, data });
   } catch (err) {
