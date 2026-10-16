@@ -168,6 +168,51 @@ export async function signInWithEmail(email, password) {
 }
 
 /**
+ * Send a Magic Link (email OTP) to the given email address.
+ * The user clicks the link in their inbox → Supabase redirects back with
+ * a session token in the URL hash, which onAuthStateChange will pick up.
+ * Returns { error } — null on success.
+ */
+export async function sendMagicLink(email) {
+  if (!supabaseClient) return { error: new Error("Supabase not configured") };
+  const { error } = await supabaseClient.auth.signInWithOtp({
+    email,
+    options: {
+      // Redirect back to the app after clicking the magic link
+      emailRedirectTo: window.location.origin,
+    },
+  });
+  return { error: error ?? null };
+}
+
+/**
+ * Verify a 6-digit OTP code sent to the user's email.
+ * Alternative to clicking the magic link — user types the code manually.
+ * Returns { user, session, error }.
+ */
+export async function verifyEmailOtp(email, token) {
+  if (!supabaseClient) return { user: null, session: null, error: new Error("Supabase not configured") };
+  const { data, error } = await supabaseClient.auth.verifyOtp({
+    email,
+    token,
+    type: "email",
+  });
+  return { user: data?.user ?? null, session: data?.session ?? null, error: error ?? null };
+}
+
+/**
+ * Resend an OTP / magic link to the same email.
+ */
+export async function resendOtp(email) {
+  if (!supabaseClient) return { error: new Error("Supabase not configured") };
+  const { error } = await supabaseClient.auth.resend({
+    type: "signup",
+    email,
+  });
+  return { error: error ?? null };
+}
+
+/**
  * Register a new user with email + password.
  * role and name go into raw_user_meta_data so the handle_new_user() trigger
  * stamps them into user_profiles and app_metadata automatically.

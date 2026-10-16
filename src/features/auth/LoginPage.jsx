@@ -4,6 +4,7 @@ import {
   ShieldCheck, Users, GraduationCap, Wallet,
   Sparkles, ArrowRight, Bot, Mail, Lock, Eye, EyeOff,
   LogIn, UserPlus, AlertCircle, CheckCircle2, ChevronDown,
+  Send, KeyRound, RefreshCw,
 } from "lucide-react";
 import GlassCard from "../../components/common/GlassCard.jsx";
 import MagneticButton from "../../components/common/MagneticButton.jsx";
@@ -12,6 +13,8 @@ import MeshBackground from "../../components/layout/MeshBackground.jsx";
 import {
   signInWithEmail,
   signUpWithEmail,
+  sendMagicLink,
+  verifyEmailOtp,
   supabaseEnabled,
 } from "../../services/supabase.js";
 
@@ -146,7 +149,7 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
   const [expandingRole, setExpandingRole] = useState(null);
 
   // Auth form state
-  const [authTab, setAuthTab] = useState("demo"); // "demo" | "signin" | "signup"
+  const [authTab, setAuthTab] = useState("demo"); // "demo" | "signin" | "signup" | "otp"
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
@@ -155,6 +158,11 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authSuccess, setAuthSuccess] = useState("");
+
+  // OTP state
+  const [otpSent, setOtpSent] = useState(false);
+  const [otpCode, setOtpCode] = useState("");
+  const [otpEmail, setOtpEmail] = useState("");
 
   // ── Demo mode handlers ──────────────────────────────────────────────────────
   const handleSelectRole = (r) => {
@@ -204,10 +212,51 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
     setPassword("");
   };
 
+  // ── Email OTP (Magic Link) handlers ─────────────────────────────────────────
+  const handleSendOtp = async () => {
+    if (!email) { setAuthError("Please enter your email address."); return; }
+    setAuthLoading(true);
+    setAuthError("");
+    setAuthSuccess("");
+    const { error } = await sendMagicLink(email);
+    setAuthLoading(false);
+    if (error) { setAuthError(error.message); return; }
+    setOtpSent(true);
+    setOtpEmail(email);
+    sound.tick();
+    setAuthSuccess("Magic link sent! Check your inbox and click the link, or enter the 6-digit code below.");
+  };
+
+  const handleVerifyOtp = async () => {
+    if (!otpCode || otpCode.length < 6) { setAuthError("Please enter the 6-digit code from your email."); return; }
+    setAuthLoading(true);
+    setAuthError("");
+    const { user, error } = await verifyEmailOtp(otpEmail, otpCode.trim());
+    setAuthLoading(false);
+    if (error) { setAuthError(error.message); return; }
+    const userRole = user?.app_metadata?.role || "counselor";
+    onRoleChange(userRole);
+    sound.chime();
+    setExpandingRole(userRole);
+    setTimeout(() => onLogin(user), 550);
+  };
+
+  const handleResendOtp = async () => {
+    setAuthLoading(true);
+    setAuthError("");
+    const { error } = await sendMagicLink(otpEmail);
+    setAuthLoading(false);
+    if (error) { setAuthError(error.message); return; }
+    sound.tick();
+    setAuthSuccess("New magic link sent! Check your inbox.");
+  };
+
   const handleKeyDown = (e) => {
     if (e.key === "Enter") {
       if (authTab === "signin") handleSignIn();
       else if (authTab === "signup") handleSignUp();
+      else if (authTab === "otp" && !otpSent) handleSendOtp();
+      else if (authTab === "otp" && otpSent) handleVerifyOtp();
     }
   };
 
@@ -299,12 +348,13 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
         >
           {[
             { id: "demo", label: "Demo Mode" },
+            { id: "otp", label: "Email OTP", disabled: !supabaseEnabled },
             { id: "signin", label: "Sign In", disabled: !supabaseEnabled },
             { id: "signup", label: "Register", disabled: !supabaseEnabled },
           ].map(({ id, label, disabled }) => (
             <button
               key={id}
-              onClick={() => { if (!disabled) { sound.tick(); setAuthTab(id); setAuthError(""); setAuthSuccess(""); } }}
+              onClick={() => { if (!disabled) { sound.tick(); setAuthTab(id); setAuthError(""); setAuthSuccess(""); if (id !== "otp") { setOtpSent(false); setOtpCode(""); } } }}
               title={disabled ? "Configure Supabase credentials to enable real auth" : undefined}
               style={{
                 padding: "7px 18px", borderRadius: "var(--radius-sm)",
@@ -417,6 +467,116 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                   <span>Role-scoped SQLite security policies are enforced on all queries and actions.</span>
                 </div>
               </div>
+            </motion.div>
+          )}
+
+          {/* ─── EMAIL OTP (MAGIC LINK) ───────────────────────────────────── */}
+          {authTab === "otp" && (
+            <motion.div
+              key="otp"
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, y: -8 }}
+              transition={{ duration: 0.2 }}
+              style={{ maxWidth: 400, margin: "0 auto" }}
+            >
+              <GlassCard style={{ padding: 28, textAlign: "left" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 4 }}>
+                  <div style={{ width: 36, height: 36, borderRadius: 8, background: "var(--accent-primary)", display: "grid", placeItems: "center" }}>
+                    <Mail size={18} color="#fff" />
+                  </div>
+                  <h2 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "20px", fontWeight: 700, color: "var(--text-primary)" }}>
+                    {otpSent ? "Verify Code" : "Email Login"}
+                  </h2>
+                </div>
+                <p style={{ fontSize: "13px", color: "var(--text-secondary)", marginBottom: 20 }}>
+                  {otpSent
+                    ? `We sent a magic link and 6-digit code to ${otpEmail}`
+                    : "No password required — we'll send a login link to your email."
+                  }
+                </p>
+
+                {!otpSent ? (
+                  /* Step 1: Enter email */
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }} onKeyDown={handleKeyDown}>
+                    <AuthInput
+                      type="email"
+                      placeholder="you@institute.app"
+                      value={email}
+                      onChange={setEmail}
+                      icon={Mail}
+                    />
+                  </div>
+                ) : (
+                  /* Step 2: Enter 6-digit OTP code */
+                  <div style={{ display: "flex", flexDirection: "column", gap: 12 }} onKeyDown={handleKeyDown}>
+                    <AuthInput
+                      type="text"
+                      placeholder="Enter 6-digit code"
+                      value={otpCode}
+                      onChange={(v) => setOtpCode(v.replace(/[^0-9]/g, "").slice(0, 6))}
+                      icon={KeyRound}
+                    />
+                    <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "12px", color: "var(--text-muted)" }}>
+                      <span>Didn't receive it?</span>
+                      <button
+                        onClick={handleResendOtp}
+                        disabled={authLoading}
+                        style={{
+                          background: "none", border: "none", cursor: "pointer",
+                          color: "var(--accent-primary)", fontWeight: 600, fontSize: "12px",
+                          display: "inline-flex", alignItems: "center", gap: 4,
+                        }}
+                      >
+                        <RefreshCw size={11} /> Resend
+                      </button>
+                      <span>or check spam folder</span>
+                    </div>
+                  </div>
+                )}
+
+                {authError && (
+                  <div style={{ marginTop: 12, padding: "9px 12px", borderRadius: "var(--radius-sm)", background: "#FEF2F2", border: "1px solid #FCA5A5", display: "flex", alignItems: "center", gap: 8, fontSize: "12.5px", color: "#B91C1C" }}>
+                    <AlertCircle size={14} />
+                    {authError}
+                  </div>
+                )}
+                {authSuccess && (
+                  <div style={{ marginTop: 12, padding: "9px 12px", borderRadius: "var(--radius-sm)", background: "#F0FDF4", border: "1px solid #86EFAC", display: "flex", alignItems: "center", gap: 8, fontSize: "12.5px", color: "#15803D" }}>
+                    <CheckCircle2 size={14} />
+                    {authSuccess}
+                  </div>
+                )}
+
+                <MagneticButton
+                  variant="primary"
+                  onClick={otpSent ? handleVerifyOtp : handleSendOtp}
+                  style={{ width: "100%", marginTop: 18, padding: "11px", fontSize: "14px", justifyContent: "center", opacity: authLoading ? 0.7 : 1 }}
+                >
+                  {authLoading
+                    ? (otpSent ? "Verifying…" : "Sending…")
+                    : otpSent
+                      ? <><KeyRound size={15} /> Verify & Sign In</>
+                      : <><Send size={15} /> Send Magic Link</>
+                  }
+                </MagneticButton>
+
+                {otpSent && (
+                  <button
+                    onClick={() => { setOtpSent(false); setOtpCode(""); setAuthError(""); setAuthSuccess(""); }}
+                    style={{ display: "block", margin: "12px auto 0", background: "none", border: "none", cursor: "pointer", color: "var(--text-muted)", fontSize: "12px" }}
+                  >
+                    ← Use a different email
+                  </button>
+                )}
+
+                <p style={{ textAlign: "center", marginTop: 14, fontSize: "12px", color: "var(--text-muted)" }}>
+                  Prefer password?{" "}
+                  <button onClick={() => { setAuthTab("signin"); setAuthError(""); }} style={{ background: "none", border: "none", cursor: "pointer", color: "var(--accent-primary)", fontWeight: 600, fontSize: "12px" }}>
+                    Sign In with password
+                  </button>
+                </p>
+              </GlassCard>
             </motion.div>
           )}
 
