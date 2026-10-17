@@ -1,4 +1,5 @@
--- Apply after creating the InstituteOS tables. Supabase auth.app_metadata.role is server-managed.
+-- LEGACY REFERENCE ONLY. Do not apply this script separately; use the ordered
+-- timestamped migrations. Current authorization derives from institute_members.
 create or replace function public.institute_role()
 returns text
 language sql
@@ -111,7 +112,6 @@ drop policy if exists audit_owner on public.audit_log;
 create policy audit_owner on public.audit_log for select to authenticated
   using (public.institute_role() = 'owner');
 drop policy if exists audit_insert_authenticated on public.audit_log;
-create policy audit_insert_authenticated on public.audit_log for insert to authenticated
-  with check (user_id::text = (auth.jwt() -> 'app_metadata' ->> 'user_id'));
+revoke insert on public.audit_log from anon, authenticated;
 
 grant select on public.trainer_students, public.account_students, public.counselor_fee_summary to authenticated;

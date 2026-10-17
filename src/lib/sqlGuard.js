@@ -15,7 +15,7 @@ function parseReferences(sql, allowedTables) {
 
   const tableAliases = new Map();
   const referencedTables = new Set();
-  const tablePattern = /\b(?:FROM|JOIN)\s+([a-z_][\w]*)(?:\s+(?:AS\s+)?([a-z_][\w]*))?/gi;
+  const tablePattern = /\b(?:FROM|JOIN)\s+([a-z_][\w]*)(?:\s+(?:AS\s+)?(?!(?:JOIN|LEFT|RIGHT|FULL|INNER|OUTER|CROSS|WHERE|GROUP|ORDER|HAVING|LIMIT|UNION|ON)\b)([a-z_][\w]*))?/gi;
   for (const match of sql.matchAll(tablePattern)) {
     const table = match[1].toLowerCase();
     if (ctes.has(table)) {
@@ -55,18 +55,19 @@ function parseReferences(sql, allowedTables) {
   return { ctes, referencedTables };
 }
 
-export function guardSql(sql, role = "owner", params = []) {
+export function guardSql(sql, role = "owner", params = [], policyOverride = null) {
   if (typeof sql !== "string" || !sql.trim()) throw new Error("A query is required.");
   if (/[;]|--|\/\*|\*\//.test(sql)) throw new Error("Only a single statement without comments is allowed.");
-  const normalized = removeStringLiterals(sql).trim();
+  const source = sql.trim();
+  const normalized = removeStringLiterals(source).trim();
   if (!/^(?:SELECT|WITH)\b/i.test(normalized)) throw new Error("Only read-only SELECT queries are allowed.");
   if (blockedWords.test(normalized)) throw new Error("The query contains a blocked operation.");
 
-  const policy = getPolicy(role);
+  const policy = policyOverride || getPolicy(role);
   const { referencedTables } = parseReferences(normalized, policy.tables);
   const limitMatch = normalized.match(/\bLIMIT\s+(\d+)\s*$/i);
   if (limitMatch && Number(limitMatch[1]) > 200) throw new Error("The maximum result limit is 200 rows.");
-  const safeSql = limitMatch ? normalized : `${normalized} LIMIT 200`;
+  const safeSql = limitMatch ? source : `${source} LIMIT 200`;
 
   return { sql: safeSql, params, tables: [...referencedTables], role };
 }

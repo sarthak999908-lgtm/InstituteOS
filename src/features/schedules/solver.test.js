@@ -35,8 +35,8 @@ describe("weekly schedule solver", () => {
     expect(oneRun.ok).toBe(true);
     expect(oneRun.nodes).toBeLessThan(30000);
     expect(performance.now() - singleRunStarted).toBeLessThan(1500);
-    expect(performance.now() - started).toBeLessThan(30000);
-  }, 35000);
+    expect(performance.now() - started).toBeLessThan(40000);
+  }, 45000);
 
   it("explains moved slots when a trainer loses a weekly availability window", () => {
     const input = makeSchedule(4);

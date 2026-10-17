@@ -14,9 +14,19 @@ import {
   supabaseEnabled,
   onAuthStateChange,
   signOut as supabaseSignOut,
-  getUserProfile,
   getSession,
+  getAuthenticatedInstituteContext,
+  clearLocalAuthState,
+  supabaseConfigStatus,
 } from "./services/supabase.js";
+import { getSessionRefreshErrorMessage } from "./features/auth/authErrors.js";
+import { appHrefWithoutLocalDemo, localDemoMode, localDemoUser } from "./lib/localDemo.js";
+import {
+  AuthResolvingScreen,
+  MembershipCheckErrorScreen,
+  SupabaseConfigurationScreen,
+  UnlinkedInstituteScreen,
+} from "./features/auth/AuthStateScreens.jsx";
 
 
 // Layout & Common Components
@@ -48,22 +58,22 @@ const ReportsPage = lazy(() => import("./features/admin/AdminPages.jsx").then((m
 const SettingsPage = lazy(() => import("./features/admin/AdminPages.jsx").then((m) => ({ default: m.SettingsPage })));
 const SchedulesPage = lazy(() => import("./features/schedules/SchedulesPage.jsx"));
 
-function hasDemoSession() {
-  try {
-    return localStorage.getItem("instituteos_demo_session") === "true";
-  } catch {
-    return false;
-  }
-}
-
 export default function App() {
-  const { role, userId, userName, setRole } = useSessionStore();
+  const { role, userId, userName, setRole, clearSession } = useSessionStore();
   const { calmMode } = useTheme();
   const prefersReducedMotion = useReducedMotion();
 
-  // Start signed-in only from localStorage demo flag; Supabase session is
-  // checked asynchronously below via onAuthStateChange / getSession.
-  const [signedIn, setSignedIn] = useState(hasDemoSession);
+  const [signedIn, setSignedIn] = useState(false);
+  const [authResolved, setAuthResolved] = useState(false);
+  const [membershipLoading, setMembershipLoading] = useState(false);
+  const [membershipError, setMembershipError] = useState(false);
+  const [unlinkedAccount, setUnlinkedAccount] = useState(null);
+  const [authNotice, setAuthNotice] = useState("");
+  const authAttemptRef = useRef(0);
+  const authorizedSessionRef = useRef(false);
+  const signOutInProgressRef = useRef(false);
+  const signedInRef = useRef(signedIn);
+  signedInRef.current = signedIn;
 
   const [activeTab, setActiveTab] = useState(() => {
     try {
@@ -124,39 +134,108 @@ export default function App() {
     }
   }, [calmMode, prefersReducedMotion]);
 
-  // ── Auth session restore ───────────────────────────────────────────────────
-  useEffect(() => {
-    // Check for an existing session on mount (handles page refresh)
-    getSession().then(async (session) => {
-      if (session?.user) {
-        const profile = await getUserProfile(session.user.id);
-        const userRole = profile?.role || session.user.role || session.user.app_metadata?.role || "owner";
-        setRole(userRole);
-        setSignedIn(true);
-      }
-    });
+  const verifySessionMembership = useCallback(async (session) => {
+    const attempt = ++authAttemptRef.current;
+    if (!session?.user) {
+      authorizedSessionRef.current = false;
+      setSignedIn(false);
+      setUnlinkedAccount(null);
+      setMembershipLoading(false);
+      setAuthResolved(true);
+      return null;
+    }
 
-    if (!supabaseEnabled) return;
-
-    // Subscribe to future auth events
-    const unsub = onAuthStateChange(async (event, session) => {
-      if (event === "SIGNED_IN" && session?.user) {
-        const profile = await getUserProfile(session.user.id);
-        const userRole = profile?.role || session.user.role || session.user.app_metadata?.role || "counselor";
-        setRole(userRole);
-        setSignedIn(true);
-      }
-      if (event === "SIGNED_OUT") {
-        try { localStorage.removeItem("instituteos_demo_session"); } catch {}
-        try { localStorage.removeItem("instituteos_session"); } catch {}
+    setMembershipLoading(true);
+    setMembershipError(false);
+    setAuthNotice("");
+    try {
+      const context = await getAuthenticatedInstituteContext();
+      if (attempt !== authAttemptRef.current) return null;
+      if (!context?.role || !context?.user_id || !context?.institute_id) {
+        authorizedSessionRef.current = false;
+        clearSession();
         setSignedIn(false);
+        setUnlinkedAccount({ email: session.user.email || "", userId: session.user.id || "" });
+        return null;
+      }
+      authorizedSessionRef.current = true;
+      setUnlinkedAccount(null);
+      setRole(context.role, { ...session.user, instituteUserId: context.user_id });
+      setSignedIn(true);
+      return context;
+    } catch {
+      if (attempt !== authAttemptRef.current) return null;
+      authorizedSessionRef.current = false;
+      clearSession();
+      setSignedIn(false);
+      setUnlinkedAccount(null);
+      setMembershipError(true);
+      return null;
+    } finally {
+      if (attempt === authAttemptRef.current) {
+        setMembershipLoading(false);
+        setAuthResolved(true);
+      }
+    }
+  }, [clearSession, setRole]);
+
+  // ── Auth session restore and expiry handling ────────────────────────────────
+  useEffect(() => {
+    let active = true;
+    if (localDemoMode) {
+      authorizedSessionRef.current = false;
+      clearSession();
+      setRole("owner", localDemoUser);
+      setSignedIn(true);
+      setAuthResolved(true);
+      setMembershipLoading(false);
+      return () => { active = false; };
+    }
+
+    getSession()
+      .then((session) => {
+        if (!active) return;
+        if (session?.user) void verifySessionMembership(session);
+        else {
+          setSignedIn(false);
+          setAuthResolved(true);
+        }
+      })
+      .catch(() => {
+        if (!active) return;
+        clearSession();
+        setSignedIn(false);
+        setAuthNotice(getSessionRefreshErrorMessage());
+        setAuthResolved(true);
+      });
+
+    if (!supabaseEnabled) return () => { active = false; };
+
+    const unsub = onAuthStateChange((event, session) => {
+      if (event === "TOKEN_REFRESHED" && session?.user) {
+        authorizedSessionRef.current = authorizedSessionRef.current || signedInRef.current;
+      }
+      if ((event === "TOKEN_REFRESHED" && !session) || event === "SIGNED_OUT") {
+        const unexpectedSignOut = authorizedSessionRef.current && !signOutInProgressRef.current;
+        authorizedSessionRef.current = false;
+        authAttemptRef.current += 1;
+        clearSession();
+        setSignedIn(false);
+        setUnlinkedAccount(null);
+        setMembershipError(false);
+        setMembershipLoading(false);
+        setAuthResolved(true);
         setActiveTab("Dashboard");
+        setAuthNotice(unexpectedSignOut ? "Your session expired. Please sign in again." : "");
+        void clearLocalAuthState();
       }
     });
 
-    return unsub;
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    return () => {
+      active = false;
+      unsub();
+    };
+  }, [clearLocalAuthState, clearSession, setRole, verifySessionMembership]);
 
 
   // Load dashboard telemetry data
@@ -170,8 +249,9 @@ export default function App() {
       setDashboard(res);
       setLastUpdated(new Date());
     } catch (err) {
-      console.warn("Live API connection unavailable, falling back to local SQLite telemetry.", err);
-      setError("Dashboard live telemetry unavailable. Displaying local data.");
+      console.warn("Live dashboard request failed.", err);
+      setDashboard(null);
+      setError("Dashboard data is unavailable. Retry when the backend connection is restored.");
     } finally {
       setLoading(false);
     }
@@ -253,16 +333,17 @@ export default function App() {
       window.location.hash = "ui";
     } else {
       if (window.location.hash === "#ui") {
-        window.history.replaceState(null, "", window.location.pathname);
+        window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
       }
     }
   };
 
-  const changeRole = (nextRole) => {
-    setRole(nextRole);
-    if ((nextRole === "trainer" || nextRole === "counselor") && (activeTab === "Fees" || activeTab === "Settings")) {
-      setActiveTab("Dashboard");
-    }
+  const changeRole = (nextRole, user = null) => {
+    // The role is accepted only alongside the authenticated Supabase user.
+    // Local role switching in the settings UI is not an authorization source.
+    if (!user) return;
+    if (!["owner", "counselor", "trainer", "accounts"].includes(nextRole)) return;
+    setRole(nextRole, user);
   };
 
   const handleCopilotPrompt = (prompt) => {
@@ -275,23 +356,77 @@ export default function App() {
     setDrawerOpen(true);
   };
 
-  const signIn = (user) => {
-    try {
-      // Only set demo flag when no real Supabase user is provided
-      if (!user) localStorage.setItem("instituteos_demo_session", "true");
-    } catch {}
+  const signIn = (user, authorizedRole, context) => {
+    if (!user || !context?.user_id || !["owner", "counselor", "trainer", "accounts"].includes(authorizedRole)) {
+      setSignedIn(false);
+      return;
+    }
+    authAttemptRef.current += 1;
+    authorizedSessionRef.current = true;
+    setAuthNotice("");
+    setMembershipError(false);
+    setUnlinkedAccount(null);
+    setRole(authorizedRole, { ...user, instituteUserId: context.user_id });
     setSignedIn(true);
-    toast.success("Welcome back!", `Signed in as ${userName} (${role.toUpperCase()})`);
+    toast.success("Welcome back!", `Signed in as ${user?.user_metadata?.name || user?.email || "user"} (${authorizedRole.toUpperCase()})`);
+  };
+
+  const showUnlinkedAccount = (account) => {
+    authAttemptRef.current += 1;
+    authorizedSessionRef.current = false;
+    clearSession();
+    setSignedIn(false);
+    setMembershipError(false);
+    setMembershipLoading(false);
+    setAuthResolved(true);
+    setAuthNotice("");
+    setUnlinkedAccount({ email: account?.email || "", userId: account?.userId || "" });
+  };
+
+  const retryMembershipCheck = async () => {
+    setMembershipError(false);
+    setMembershipLoading(true);
+    try {
+      const session = await getSession();
+      if (!session?.user) {
+        setMembershipLoading(false);
+        setMembershipError(true);
+        return;
+      }
+      await verifySessionMembership(session);
+    } catch {
+      setMembershipLoading(false);
+      setMembershipError(true);
+    }
   };
 
   const signOut = async () => {
-    try { localStorage.removeItem("instituteos_demo_session"); } catch {}
-    try { localStorage.removeItem("instituteos_session"); } catch {}
-    await supabaseSignOut();
-    setSignedIn(false);
-    setActiveTab("Dashboard");
+    if (localDemoMode) {
+      window.location.assign(appHrefWithoutLocalDemo());
+      return;
+    }
+    signOutInProgressRef.current = true;
+    authorizedSessionRef.current = false;
+    authAttemptRef.current += 1;
+    try {
+      await supabaseSignOut();
+    } finally {
+      signOutInProgressRef.current = false;
+      clearSession();
+      setSignedIn(false);
+      setUnlinkedAccount(null);
+      setMembershipError(false);
+      setMembershipLoading(false);
+      setAuthResolved(true);
+      setAuthNotice("");
+      setActiveTab("Dashboard");
+    }
   };
 
+
+  if (!supabaseConfigStatus.configured && !localDemoMode) {
+    return <SupabaseConfigurationScreen variables={supabaseConfigStatus.issues} />;
+  }
 
   // 1. First-Load Boot Sequence (1.6s on a clean white canvas)
   if (!bootCompleted) {
@@ -307,9 +442,29 @@ export default function App() {
     );
   }
 
+  if (!authResolved || (membershipLoading && !signedIn)) {
+    return <AuthResolvingScreen message="Checking your sign-in and institute access…" />;
+  }
+
+  if (unlinkedAccount) {
+    return <UnlinkedInstituteScreen email={unlinkedAccount.email} userId={unlinkedAccount.userId} onSignOut={signOut} />;
+  }
+
+  if (membershipError && !signedIn) {
+    return <MembershipCheckErrorScreen onRetry={retryMembershipCheck} onSignOut={signOut} />;
+  }
+
   // 2. Authentication View (4 3D-tilting glass cards)
   if (!signedIn) {
-    return <LoginPage role={role} onRoleChange={changeRole} onLogin={signIn} />;
+    return (
+      <LoginPage
+        role={role}
+        onRoleChange={changeRole}
+        onLogin={signIn}
+        onUnlinkedAccount={showUnlinkedAccount}
+        authNotice={authNotice}
+      />
+    );
   }
 
   return (
@@ -341,6 +496,12 @@ export default function App() {
           zIndex: 1,
         }}
       >
+        {localDemoMode && (
+          <div role="status" style={{ padding: "10px 18px", background: "#FFF7D6", color: "#713F12", borderBottom: "1px solid #FDE68A", fontSize: 13, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
+            <span><strong>LOCAL DEMO</strong> · fictional records only · browser-only changes · no Supabase or backend requests</span>
+            <button type="button" onClick={signOut} style={{ border: 0, background: "transparent", color: "inherit", textDecoration: "underline", cursor: "pointer" }}>Exit demo</button>
+          </div>
+        )}
         {/* Sticky Topbar */}
         <Topbar
           activeTab={activeTab}
@@ -394,6 +555,7 @@ export default function App() {
                     onNavigate={navigateTo}
                     onSelectStudent={handleSelectStudentForDrawer}
                     role={role}
+                    localDemoMode={localDemoMode}
                   />
                 )}
 
@@ -434,7 +596,6 @@ export default function App() {
                     role={role}
                     userId={userId}
                     userName={userName}
-                    onRoleChange={changeRole}
                   />
                 )}
 

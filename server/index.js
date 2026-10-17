@@ -2,6 +2,9 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 import { createClient } from "@supabase/supabase-js";
+import { createHash, randomUUID } from "node:crypto";
+import { createCopilotService, CopilotFallbackRequired, isTrainerFinanceQuestion } from "./copilot/service.js";
+import { PROMPT_VERSION } from "./copilot/systemPrompt.js";
 
 dotenv.config();
 
@@ -10,16 +13,17 @@ const PORT = process.env.PORT || 5000;
 
 
 app.use(cors());
-app.use(express.json());
+app.use(express.json({ limit: "256kb", strict: true }));
 
 // ── Supabase clients ─────────────────────────────────────────────────────────
 const supabaseUrl = process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL;
-const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || process.env.VITE_SUPABASE_ANON_KEY;
 const supabaseAnonKey = process.env.VITE_SUPABASE_ANON_KEY || process.env.SUPABASE_ANON_KEY;
+const supabaseServiceRoleKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-// Service-role client (bypasses RLS — data queries)
-export const supabase = (supabaseUrl && supabaseKey && supabaseUrl.startsWith("http"))
-  ? createClient(supabaseUrl, supabaseKey)
+// Public-key client is used only for Auth verification and anonymous health probes.
+// Data requests use a separate client carrying the verified user's JWT.
+export const supabase = (supabaseUrl && supabaseAnonKey && supabaseUrl.startsWith("http"))
+  ? createClient(supabaseUrl, supabaseAnonKey, { auth: { persistSession: false, autoRefreshToken: false } })
   : null;
 
 // Anon client — used to verify user JWTs (never bypasses RLS)
@@ -27,69 +31,293 @@ const supabaseAnon = (supabaseUrl && supabaseAnonKey && supabaseUrl.startsWith("
   ? createClient(supabaseUrl, supabaseAnonKey)
   : null;
 
-if (supabase) {
-  console.log("Connected to Supabase PostgreSQL Backend at:", supabaseUrl);
-} else {
-  console.log("No Supabase credentials detected. Operating in local demo/fallback mode.");
+// Never import this client into browser code. It is used only for append-only
+// audit inserts and manually authorized server-side approval/payment writes.
+const supabaseServiceRole = (supabaseUrl && supabaseServiceRoleKey && supabaseUrl.startsWith("http"))
+  ? createClient(supabaseUrl, supabaseServiceRoleKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  })
+  : null;
+
+export function createAuditWriter(client, { idFactory = randomUUID, clock = () => new Date() } = {}) {
+  return async function audit(req, event, detail = {}) {
+    const context = req?.authContext;
+    if (!client || !context?.authUserId || !context?.userId || !context?.instituteId
+        || !["owner", "counselor", "trainer", "accounts"].includes(context.role)
+        || typeof event !== "string" || !event.trim()) {
+      throw new Error("Audit write unavailable.");
+    }
+
+    let serializedDetail;
+    try {
+      serializedDetail = JSON.stringify(detail ?? {});
+    } catch {
+      throw new Error("Audit write unavailable.");
+    }
+    if (serializedDetail.length > 8000) throw new Error("Audit write unavailable.");
+
+    const entry = {
+      id: idFactory(),
+      at: clock().toISOString(),
+      user_id: context.userId,
+      role: context.role,
+      institute_id: context.instituteId,
+      event: event.trim().slice(0, 120),
+      detail: serializedDetail,
+    };
+    try {
+      const { error } = await client.from("audit_log").insert(entry);
+      if (error) throw error;
+    } catch {
+      throw new Error("Audit write unavailable.");
+    }
+    return entry;
+  };
 }
 
-// In-memory OTP storage for email auth when SMTP is not configured
-const activeOtps = new Map();
+const audit = createAuditWriter(supabaseServiceRole);
 
-// Helper to determine role from email
-function determineRoleFromEmail(email) {
-  const lower = (email || "").toLowerCase();
-  if (lower.includes("owner") || lower.includes("admin")) return "owner";
-  if (lower.includes("trainer")) return "trainer";
-  if (lower.includes("account")) return "accounts";
-  return "counselor";
+export function createCopilotApprovalWriter(client, auditWriter = audit, idFactory = randomUUID) {
+  return async function createCopilotApproval(req, { kind, payload, preview, actionKind }) {
+    const context = req?.authContext;
+    if (!client || !context?.userId || !context?.instituteId || !context?.role) {
+      throw new Error("The audited approval service is unavailable.");
+    }
+    const allowedKinds = {
+      owner: new Set(["whatsapp_reminders", "attendance_bulk_mark", "fee_action", "schedule_replan"]),
+      counselor: new Set(["whatsapp_reminders", "fee_action", "schedule_replan"]),
+      trainer: new Set(["attendance_bulk_mark"]),
+      accounts: new Set(["fee_action"]),
+    };
+    if (!allowedKinds[context.role]?.has(kind)) throw new Error("This role cannot request this approval.");
+    const approvalId = `COP-${idFactory()}`;
+    const previewText = String(preview || "").slice(0, 8000);
+    const payloadText = JSON.stringify(payload || {});
+    const detail = {
+      approvalId,
+      kind,
+      actionKind,
+      previewHash: createHash("sha256").update(`${previewText}\n${payloadText}`).digest("hex"),
+      previewLength: previewText.length,
+      promptVersion: PROMPT_VERSION,
+    };
+    await auditWriter(req, "approval.request_attempt", detail);
+    const { data, error } = await client.from("approvals").insert({
+      id: approvalId,
+      institute_id: context.instituteId,
+      kind,
+      payload: payload || {},
+      preview: previewText,
+      status: "pending",
+      requested_by: context.userId,
+    }).select("id,kind,status,created_at").single();
+    if (error || !data) throw new Error("The approval preview could not be saved.");
+    return data;
+  };
+}
+
+export function withApprovedReminderMessages(existingPayload, submittedRecipients) {
+  const payload = typeof existingPayload === "string" ? JSON.parse(existingPayload) : existingPayload;
+  const recipients = payload && !Array.isArray(payload) ? payload.recipients : null;
+  if (!Array.isArray(recipients) || !Array.isArray(submittedRecipients)
+      || recipients.length < 1 || recipients.length > 200 || recipients.length !== submittedRecipients.length) {
+    throw new Error("The edited reminder preview does not match the saved recipients.");
+  }
+
+  const edits = new Map();
+  for (const item of submittedRecipients) {
+    const id = typeof item?.studentId === "string" ? item.studentId : typeof item?.student_id === "string" ? item.student_id : "";
+    if (!id || edits.has(id) || typeof item?.message !== "string" || item.message.length > 1000) {
+      throw new Error("Each saved recipient needs one message of at most 1,000 characters.");
+    }
+    const message = item.message.replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g, " ").trim();
+    if (!message) throw new Error("Reminder messages cannot be empty.");
+    edits.set(id, message);
+  }
+
+  const savedIds = new Set();
+  const updatedRecipients = recipients.map((recipient) => {
+    const id = String(recipient?.studentId ?? recipient?.student_id ?? "");
+    if (!id || savedIds.has(id) || !edits.has(id)) throw new Error("The edited reminder preview does not match the saved recipients.");
+    savedIds.add(id);
+    return { ...recipient, message: edits.get(id) };
+  });
+  if (savedIds.size !== edits.size) throw new Error("The edited reminder preview does not match the saved recipients.");
+  return { ...payload, recipients: updatedRecipients };
+}
+
+const createCopilotApproval = createCopilotApprovalWriter(supabaseServiceRole, audit);
+const copilotService = createCopilotService({ audit, approvalCreator: createCopilotApproval });
+
+async function writeRequiredAudit(req, res, event, detail) {
+  try {
+    await audit(req, event, detail);
+    return true;
+  } catch {
+    res.status(503).json({ success: false, error: "The audit service is unavailable; the action was not performed." });
+    return false;
+  }
+}
+
+if (supabase) {
+  console.log("Supabase public-key client configured; connectivity is checked per request.");
+} else {
+  console.log("Supabase is not configured. Protected API requests will be denied.");
 }
 
 // ── JWT & Token Auth Middleware ──────────────────────────────────────────────
 /**
- * requireAuth — verifies Bearer token (Supabase JWT or InstituteOS token)
+ * requireAuth — verifies a Supabase access token and resolves its server-managed role.
  * Attaches req.user and req.role to the request.
  */
-async function requireAuth(req, res, next) {
-  const authHeader = req.headers["authorization"] || "";
-  const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
-
-  // Check for local InstituteOS token
-  if (token && token.startsWith("inst_token_")) {
-    try {
-      const decoded = JSON.parse(Buffer.from(token.replace("inst_token_", ""), "base64").toString("utf-8"));
-      req.user = decoded;
-      req.role = decoded.role || decoded.app_metadata?.role || "owner";
-      return next();
-    } catch {}
+function readVerifiedJwtClaims(token, user) {
+  try {
+    const encoded = token.split(".")[1];
+    const claims = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8"));
+    if (claims.sub !== user.id || claims.role !== "authenticated" || Number(claims.exp) * 1000 <= Date.now()) return null;
+    return Object.freeze({
+      sub: user.id,
+      role: "authenticated",
+      ...(typeof claims.email === "string" ? { email: claims.email } : {}),
+      app_metadata: claims.app_metadata && typeof claims.app_metadata === "object" ? claims.app_metadata : {},
+    });
+  } catch {
+    return null;
   }
-
-  if (!supabaseAnon) {
-    // Local / Demo mode fallback
-    req.user = { id: "USR-OWNER", email: "admin@instituteos.app", name: "Admin" };
-    req.role = "owner";
-    return next();
-  }
-
-  if (!token) {
-    return res.status(401).json({ success: false, error: "Missing authorization token." });
-  }
-
-  const { data, error } = await supabaseAnon.auth.getUser(token);
-  if (error || !data?.user) {
-    return res.status(401).json({ success: false, error: "Invalid or expired token." });
-  }
-
-  req.user = data.user;
-  req.role = data.user.app_metadata?.role || "counselor";
-  next();
 }
+
+export function createRequireAuth({ verifyToken, createUserClient, allowUnlinked = false }) {
+  return async function requireVerifiedAuth(req, res, next) {
+    if (req.authContext) return next();
+    const authHeader = req.headers["authorization"] || "";
+    const token = authHeader.startsWith("Bearer ") ? authHeader.slice(7) : null;
+    if (!token || token.startsWith("inst_token_") || token.split(".").length !== 3) {
+      return res.status(401).json({ success: false, error: "Missing authorization token." });
+    }
+
+    let data;
+    let error;
+    try {
+      ({ data, error } = await verifyToken(token));
+    } catch {
+      return res.status(503).json({ success: false, error: "Supabase Auth is temporarily unavailable." });
+    }
+    if (error || !data?.user) return res.status(401).json({ success: false, error: "Invalid or expired token." });
+    const jwtClaims = readVerifiedJwtClaims(token, data.user);
+    if (!jwtClaims) return res.status(401).json({ success: false, error: "Invalid or expired token." });
+
+    let userSupabase;
+    let contextResult;
+    try {
+      userSupabase = createUserClient(token);
+      contextResult = await userSupabase.rpc("current_user_context");
+    } catch {
+      return res.status(503).json({ success: false, error: "InstituteOS membership verification is temporarily unavailable." });
+    }
+    if (contextResult.error) return res.status(503).json({ success: false, error: "InstituteOS membership verification is temporarily unavailable." });
+    const context = Array.isArray(contextResult.data) ? contextResult.data[0] : contextResult.data;
+    if (!context?.user_id || !context?.institute_id
+        || !["owner", "counselor", "trainer", "accounts"].includes(context.role)) {
+      if (allowUnlinked && !context) {
+        req.user = data.user;
+        req.role = null;
+        req.dbUserId = null;
+        req.instituteId = null;
+        req.jwtClaims = jwtClaims;
+        req.authContext = Object.freeze({ authUserId: data.user.id, userId: null, instituteId: null, role: null });
+        req.supabase = userSupabase;
+        return next();
+      }
+      return res.status(403).json({ success: false, error: "This account has no verified InstituteOS membership." });
+    }
+    req.user = data.user;
+    req.role = context.role;
+    req.dbUserId = context.user_id;
+    req.instituteId = context.institute_id;
+    req.jwtClaims = jwtClaims;
+    req.authContext = Object.freeze({
+      authUserId: data.user.id,
+      userId: context.user_id,
+      instituteId: context.institute_id,
+      role: context.role,
+    });
+    req.supabase = userSupabase;
+    return next();
+  };
+}
+
+const authDependencies = {
+  verifyToken: (token) => supabaseAnon.auth.getUser(token),
+  createUserClient: (token) => createClient(supabaseUrl, supabaseAnonKey, {
+    auth: { persistSession: false, autoRefreshToken: false },
+    global: { headers: { Authorization: `Bearer ${token}` } },
+  }),
+};
+export const requireAuth = createRequireAuth(authDependencies);
+const requireAuthAllowUnlinked = createRequireAuth({ ...authDependencies, allowUnlinked: true });
+
+export function createRateLimiter({ limit, windowMs, keyFor, clock = () => Date.now(), maxKeys = 20000 }) {
+  const windows = new Map();
+  return function rateLimit(req, res, next) {
+    const key = String(keyFor(req) || "unknown");
+    const now = clock();
+    let window = windows.get(key);
+    if (!window || now >= window.resetAt) {
+      if (windows.size >= maxKeys) {
+        for (const [existingKey, existing] of windows) {
+          if (now >= existing.resetAt) windows.delete(existingKey);
+        }
+      }
+      if (windows.size >= maxKeys && !windows.has(key)) {
+        return res.status(429).json({ success: false, error: "Too many requests. Try again later." });
+      }
+      window = { count: 0, resetAt: now + windowMs };
+      windows.set(key, window);
+    }
+    window.count += 1;
+    if (window.count > limit) {
+      const retrySeconds = Math.max(1, Math.ceil((window.resetAt - now) / 1000));
+      if (typeof res.setHeader === "function") res.setHeader("Retry-After", String(retrySeconds));
+      return res.status(429).json({ success: false, error: "Too many requests. Try again later." });
+    }
+    return next();
+  };
+}
+
+export function auditRowsToCsv(rows) {
+  const columns = ["at", "role", "user_id", "event", "detail"];
+  const quote = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+  return [columns, ...(Array.isArray(rows) ? rows : []).map((row) => columns.map((column) => row?.[column] ?? ""))]
+    .map((row) => row.map(quote).join(","))
+    .join("\r\n");
+}
+
+export function normalizePaymentAmount(value) {
+  const raw = typeof value === "string" ? value.trim() : Number.isSafeInteger(value) ? String(value) : "";
+  const match = /^(0|[1-9]\d{0,11})(?:\.(\d{1,2}))?$/.exec(raw);
+  if (!match) return null;
+  const fraction = (match[2] || "").padEnd(2, "0");
+  const minorUnits = BigInt(match[1]) * 100n + BigInt(fraction || "0");
+  if (minorUnits <= 0n) return null;
+  return `${match[1]}${match[2] ? `.${match[2].padEnd(2, "0")}` : ".00"}`;
+}
+
+const authIpRateLimit = createRateLimiter({
+  limit: 12,
+  windowMs: 15 * 60 * 1000,
+  keyFor: (req) => req.ip || req.socket?.remoteAddress || "unknown-ip",
+});
+const userApiRateLimit = createRateLimiter({
+  limit: 120,
+  windowMs: 60 * 1000,
+  keyFor: (req) => req.authContext?.authUserId || req.ip || "unknown-user",
+});
 
 /**
  * requireRole — gate a route to specific roles.
  * Usage: requireRole("owner", "accounts")
  */
-function requireRole(...allowedRoles) {
+export function requireRole(...allowedRoles) {
   return (req, res, next) => {
     if (!req.role || !allowedRoles.includes(req.role)) {
       return res.status(403).json({
@@ -101,153 +329,67 @@ function requireRole(...allowedRoles) {
   };
 }
 
+export const studentDeleteRoleGuard = requireRole("owner");
+
 // ── Authentication Endpoints ──────────────────────────────────────────────────
-app.post("/api/auth/magic-link", async (req, res) => {
+app.post("/api/auth/magic-link", authIpRateLimit, async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ success: false, error: "Email is required" });
-
-  if (supabaseAnon) {
-    try {
-      const { error } = await supabaseAnon.auth.signInWithOtp({ email });
-      if (!error) {
-        return res.json({ success: true, message: `Magic link sent to ${email}`, mode: "supabase" });
-      }
-    } catch (e) {
-      console.warn("Supabase signInWithOtp failed, falling back:", e.message);
-    }
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  activeOtps.set(email.toLowerCase(), { otp, createdAt: Date.now() });
-
-  console.log(`[InstituteOS Auth] OTP for ${email}: ${otp}`);
-
-  res.json({
-    success: true,
-    message: `Magic link & verification code sent to ${email}`,
-    otp, // Returned for instant UI feedback and fast verification
-    mode: "local-otp",
-  });
+  if (!supabaseAnon) return res.status(503).json({ success: false, error: "Supabase Auth is not configured." });
+  const { error } = await supabaseAnon.auth.signInWithOtp({ email });
+  if (error) return res.status(502).json({ success: false, error: "Could not start Supabase email verification." });
+  return res.json({ success: true, message: "Check your email for a sign-in link or code." });
 });
 
-app.post("/api/auth/verify-otp", async (req, res) => {
+app.post("/api/auth/verify-otp", authIpRateLimit, async (req, res) => {
   const { email, token } = req.body;
   if (!email || !token) return res.status(400).json({ success: false, error: "Email and code are required" });
 
-  if (supabaseAnon) {
-    try {
-      const { data, error } = await supabaseAnon.auth.verifyOtp({ email, token, type: "email" });
-      if (!error && data?.user) {
-        const role = data.user.app_metadata?.role || determineRoleFromEmail(email);
-        return res.json({ success: true, user: data.user, session: data.session, role });
-      }
-    } catch (e) {
-      console.warn("Supabase verifyOtp failed, trying local code:", e.message);
-    }
-  }
-
-  const stored = activeOtps.get(email.toLowerCase());
-  const isValid = token === "123456" || (stored && stored.otp === token.trim());
-
-  if (!isValid) {
-    return res.status(400).json({ success: false, error: "Invalid or expired OTP code. Use 123456 or the code sent to your email." });
-  }
-
-  activeOtps.delete(email.toLowerCase());
-  const role = determineRoleFromEmail(email);
-  const name = email.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-  const user = {
-    id: `USR-${Date.now().toString().slice(-6)}`,
-    email,
-    role,
-    name,
-    app_metadata: { role },
-    user_metadata: { name, role },
-  };
-  const tokenPayload = Buffer.from(JSON.stringify(user)).toString("base64");
-  const session = {
-    access_token: `inst_token_${tokenPayload}`,
-    user,
-  };
-
-  res.json({ success: true, user, session, role });
+  if (!supabaseAnon) return res.status(503).json({ success: false, error: "Supabase Auth is not configured." });
+  const { data, error } = await supabaseAnon.auth.verifyOtp({ email, token, type: "email" });
+  if (error || !data?.user || !data?.session) return res.status(401).json({ success: false, error: "Invalid or expired verification code." });
+  return res.json({ success: true, user: data.user, session: data.session });
 });
 
-app.post("/api/auth/signin", async (req, res) => {
+app.post("/api/auth/signin", authIpRateLimit, async (req, res) => {
   const { email, password } = req.body;
   if (!email || !password) return res.status(400).json({ success: false, error: "Email and password are required" });
 
-  if (supabaseAnon) {
-    try {
-      const { data, error } = await supabaseAnon.auth.signInWithPassword({ email, password });
-      if (!error && data?.user) {
-        const role = data.user.app_metadata?.role || determineRoleFromEmail(email);
-        return res.json({ success: true, user: data.user, session: data.session, role });
-      }
-    } catch (e) {
-      console.warn("Supabase signInWithPassword failed, falling back to local auth:", e.message);
-    }
-  }
-
-  const role = determineRoleFromEmail(email);
-  const name = email.split("@")[0].replace(/[._-]/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
-  const user = {
-    id: `USR-${Date.now().toString().slice(-6)}`,
-    email,
-    role,
-    name,
-    app_metadata: { role },
-    user_metadata: { name, role },
-  };
-  const tokenPayload = Buffer.from(JSON.stringify(user)).toString("base64");
-  const session = {
-    access_token: `inst_token_${tokenPayload}`,
-    user,
-  };
-
-  res.json({ success: true, user, session, role });
+  if (!supabaseAnon) return res.status(503).json({ success: false, error: "Supabase Auth is not configured." });
+  const { data, error } = await supabaseAnon.auth.signInWithPassword({ email, password });
+  if (error || !data?.user || !data?.session) return res.status(401).json({ success: false, error: "Email or password is incorrect." });
+  return res.json({ success: true, user: data.user, session: data.session });
 });
 
-app.post("/api/auth/register", async (req, res) => {
-  const { email, password, role = "counselor", name } = req.body;
+app.post("/api/auth/register", authIpRateLimit, async (req, res) => {
+  const { email, password, name } = req.body;
   if (!email || !password) return res.status(400).json({ success: false, error: "Email and password are required" });
-
-  if (supabaseAnon) {
-    try {
-      const { data, error } = await supabaseAnon.auth.signUp({
-        email,
-        password,
-        options: { data: { role, name: name || email.split("@")[0] } },
-      });
-      if (!error && data?.user) {
-        return res.json({ success: true, user: data.user, session: data.session, role });
-      }
-    } catch (e) {
-      console.warn("Supabase signUp failed, falling back to local auth:", e.message);
-    }
-  }
-
-  const effectiveRole = determineRoleFromEmail(email) === "owner" ? "owner" : role;
-  const user = {
-    id: `USR-${Date.now().toString().slice(-6)}`,
-    email,
-    role: effectiveRole,
-    name: name || email.split("@")[0],
-    app_metadata: { role: effectiveRole },
-    user_metadata: { name: name || email.split("@")[0], role: effectiveRole },
-  };
-  const tokenPayload = Buffer.from(JSON.stringify(user)).toString("base64");
-  const session = {
-    access_token: `inst_token_${tokenPayload}`,
-    user,
-  };
-
-  res.json({ success: true, user, session, role: effectiveRole });
+  if (!supabaseAnon) return res.status(503).json({ success: false, error: "Supabase Auth is not configured." });
+  const { data, error } = await supabaseAnon.auth.signUp({ email, password, options: { data: { name: name || email.split("@")[0] } } });
+  if (error || !data?.user) return res.status(400).json({ success: false, error: "Supabase could not create this account." });
+  return res.json({ success: true, user: data.user, session: data.session, message: data.session ? undefined : "Check your email to confirm the account. A staff role must be assigned by an administrator." });
 });
 
 app.get("/api/auth/session", requireAuth, (req, res) => {
   res.json({ success: true, user: req.user, role: req.role });
 });
+
+app.get("/api/me", requireAuthAllowUnlinked, userApiRateLimit, (req, res) => {
+  if (!req.authContext?.userId || !req.authContext?.instituteId || !req.authContext?.role) {
+    return res.json({ success: true, data: { linked: false, userId: req.user.id } });
+  }
+  return res.json({ success: true, data: {
+    linked: true,
+    userId: req.user.id,
+    profileId: req.authContext.userId,
+    instituteId: req.authContext.instituteId,
+    role: req.authContext.role,
+  } });
+});
+
+// Every API route below requires a verified Supabase identity. Health remains public.
+app.use("/api", (req, res, next) => req.path === "/health" ? next() :
+  requireAuth(req, res, (error) => error ? next(error) : userApiRateLimit(req, res, next)));
 
 
 
@@ -325,8 +467,7 @@ app.get(["/", "/api"], (req, res) => {
     success: true,
     service: "InstituteOS Backend REST API",
     status: "healthy",
-    mode: supabase ? "supabase-live" : "local-mock",
-    supabaseConnected: Boolean(supabase),
+    supabaseConfigured: Boolean(supabase),
     frontendUrl: "http://localhost:5173",
     timestamp: new Date().toISOString(),
     endpoints: [
@@ -358,90 +499,68 @@ app.get("/api/health", (req, res) => {
   res.json({
     success: true,
     status: "healthy",
-    mode: supabase ? "supabase-live" : "local-mock",
-    supabaseConnected: Boolean(supabase),
+    supabaseConfigured: Boolean(supabase),
     timestamp: new Date().toISOString(),
   });
 });
 
 // 2. Dashboard telemetry
 app.get("/api/dashboard", async (req, res) => {
-  if (supabase) {
-    try {
-      const { data, error } = await supabase.rpc("get_dashboard_telemetry");
-      if (!error && data) {
-        return res.json({ success: true, source: "supabase-rpc", data });
-      }
-
-      // Fallback manual count if RPC is not deployed yet
-      const [studentsRes, batchesRes] = await Promise.all([
-        supabase.from("students").select("id", { count: "exact" }),
-        supabase.from("batches").select("id", { count: "exact" }),
-      ]);
-
-      return res.json({
-        success: true,
-        source: "supabase-tables",
-        data: {
-          totalStudents: studentsRes.count || 1248,
-          activeBatches: batchesRes.count || 24,
-          attendancePercentage: 88.4,
-          pendingFees: 125000,
-          overdueInstalments: 18,
-        },
-      });
-    } catch (err) {
-      console.warn("Supabase dashboard query failed, using fallback:", err.message);
-    }
+  try {
+    const [studentsRes, batchesRes] = await Promise.all([
+      req.supabase.from("students").select("id", { count: "exact", head: true }),
+      req.supabase.from("batches").select("id", { count: "exact", head: true }),
+    ]);
+    if (studentsRes.error || batchesRes.error) throw studentsRes.error || batchesRes.error;
+    const data = { totalStudents: studentsRes.count || 0, activeBatches: batchesRes.count || 0 };
+    return res.json({ success: true, source: "supabase-user-scoped", data });
+  } catch {
+    return res.status(502).json({ success: false, error: "Dashboard data is temporarily unavailable." });
   }
-
-  // Fallback demo data
-  res.json({
-    success: true,
-    source: "local-demo",
-    data: {
-      totalStudents: 1248,
-      activeBatches: 24,
-      attendancePercentage: 87.5,
-      pendingFees: 125000,
-      overdueInstalments: 18,
-    },
-  });
 });
 
 // 3. Students Endpoints
 app.get("/api/students", async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase.from("students").select("*").order("name", { ascending: true });
+      const relation = req.role === "trainer" ? "trainer_students" : req.role === "accounts" ? "account_students" : "student_profiles";
+      const columns = req.role === "trainer"
+        ? "id,name,batch_id,status,batch_name"
+        : req.role === "accounts"
+          ? "id,name"
+          : "id,name,phone,email,batch_id,status,joined_on,course_id,course_name,batch_name";
+      const { data, error } = await req.supabase.from(relation).select(columns).order("name", { ascending: true });
       if (!error) return res.json({ success: true, count: data.length, data });
     } catch (err) {
       console.error("Supabase students error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [], note: "No Supabase active or table empty" });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
-app.post("/api/students", requireAuth, async (req, res) => {
+app.post("/api/students", requireRole("owner", "counselor"), async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required for server-side persistence" });
   }
 
-  const { id, name, email, phone, course, batch, status } = req.body;
+  const { id, name, email, phone, course_id, batch_id, course, batch, status } = req.body;
+  if (!name) return res.status(400).json({ success: false, error: "Student name is required." });
+  if (!await writeRequiredAudit(req, res, "student.create_attempt", { studentId: id || null })) return;
   try {
     const studentId = id || `STU-${Date.now().toString().slice(-4)}`;
-    const { data, error } = await supabase
+      const { data, error } = await req.supabase
       .from("students")
       .upsert({
         id: studentId,
         name,
         email: email || "",
         phone: phone || "",
+         course_id: course_id || null,
+         batch_id: batch_id || null,
         batch_name: batch || "Morning Batch",
         status: status || "Active",
-        updated_at: new Date().toISOString(),
       })
-      .select()
+      .select("id,name,batch_id,status,joined_on,course_id,batch_name")
       .single();
 
     if (error) throw error;
@@ -451,13 +570,14 @@ app.post("/api/students", requireAuth, async (req, res) => {
   }
 });
 
-app.delete("/api/students/:id", requireAuth, requireRole("owner", "counselor"), async (req, res) => {
+app.delete("/api/students/:id", requireAuth, studentDeleteRoleGuard, async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
 
+  if (!await writeRequiredAudit(req, res, "student.delete_attempt", { studentId: req.params.id })) return;
   try {
-    const { error } = await supabase.from("students").delete().eq("id", req.params.id);
+    const { error } = await req.supabase.from("students").delete().eq("id", req.params.id);
     if (error) throw error;
     res.json({ success: true, message: `Student ${req.params.id} deleted` });
   } catch (err) {
@@ -469,13 +589,13 @@ app.delete("/api/students/:id", requireAuth, requireRole("owner", "counselor"), 
 app.get("/api/batches", async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase.from("batches").select("*").order("start_date", { ascending: false });
+      const { data, error } = await req.supabase.from("batches").select("*").order("start_date", { ascending: false });
       if (!error) return res.json({ success: true, count: data.length, data });
     } catch (err) {
       console.error("Supabase batches error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
 app.post("/api/batches", requireAuth, requireRole("owner", "counselor"), async (req, res) => {
@@ -487,10 +607,11 @@ app.post("/api/batches", requireAuth, requireRole("owner", "counselor"), async (
   if (!name || !start_date) {
     return res.status(400).json({ success: false, error: "Batch name and start_date are required" });
   }
+  if (!await writeRequiredAudit(req, res, "batch.create_attempt", { batchId: typeof id === "string" ? id : null })) return;
 
   try {
     const batchId = id || `BAT-${Date.now().toString().slice(-5)}`;
-    const { data, error } = await supabase
+      const { data, error } = await req.supabase
       .from("batches")
       .upsert({
         id: batchId,
@@ -519,10 +640,10 @@ app.post("/api/batches", requireAuth, requireRole("owner", "counselor"), async (
 
 
 // 5. Fees & Payments
-app.get("/api/fees", async (req, res) => {
+app.get("/api/fees", requireRole("owner", "accounts"), async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase.from("instalments").select(`
+      const { data, error } = await req.supabase.from("instalments").select(`
         id, student_id, due_date, amount, paid_amount, status,
         students ( id, name, course_id )
       `);
@@ -531,36 +652,43 @@ app.get("/api/fees", async (req, res) => {
       console.error("Supabase fees error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
 app.post("/api/fees/payment", requireAuth, requireRole("owner", "accounts"), async (req, res) => {
-  if (!supabase) {
-    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  if (!supabaseServiceRole) {
+    return res.status(503).json({ success: false, error: "The audited payment service is not configured." });
   }
 
   const { studentId, instalmentId, amount, method, utr } = req.body;
+  const amountDecimal = normalizePaymentAmount(amount);
+  if (typeof studentId !== "string" || !studentId.trim()
+      || (instalmentId !== undefined && instalmentId !== null && (typeof instalmentId !== "string" || !instalmentId.trim()))
+      || !amountDecimal
+      || (method !== undefined && (typeof method !== "string" || !["bank_transfer", "upi", "cash", "card"].includes(method)))
+      || (utr !== undefined && (typeof utr !== "string" || utr.length > 160))) {
+    return res.status(400).json({ success: false, error: "Payment details are invalid." });
+  }
   try {
     const paymentId = `PAY-${Date.now()}`;
-    const { data, error } = await supabase.from("payments").insert({
-      id: paymentId,
-      student_id: studentId,
-      instalment_id: instalmentId,
-      amount: Number(amount),
+    if (!await writeRequiredAudit(req, res, "fee.payment_attempt", {
+      studentId,
+      instalmentId: instalmentId || null,
+      amount: amountDecimal,
       method: method || "bank_transfer",
-      utr: utr || "",
-      received_on: new Date().toISOString().slice(0, 10),
-    }).select().single();
-
+    })) return;
+    const { data, error } = await supabaseServiceRole.rpc("record_payment_for_user", {
+      p_id: paymentId,
+      p_student_id: studentId,
+      p_instalment_id: instalmentId || null,
+      p_amount: amountDecimal,
+      p_method: method || "bank_transfer",
+      p_utr: utr || "",
+      p_received_on: new Date().toISOString().slice(0, 10),
+      p_auth_user_id: req.authContext.authUserId,
+      p_institute_id: req.authContext.instituteId,
+    });
     if (error) throw error;
-
-    // Increment paid_amount in instalment
-    if (instalmentId) {
-      await supabase.rpc("increment_instalment_paid", {
-        p_instalment_id: instalmentId,
-        p_amount: Number(amount),
-      }).catch(() => {});
-    }
 
     res.json({ success: true, data });
   } catch (err) {
@@ -572,11 +700,11 @@ app.post("/api/fees/payment", requireAuth, requireRole("owner", "accounts"), asy
 app.get("/api/attendance", async (req, res) => {
   if (supabase) {
     try {
-      const query = supabase.from("attendance").select(`
-        id, session_id, student_id, status, marked_at,
+      const query = req.supabase.from("attendance").select(`
+        id, session_id, student_id, status, checkin_at, created_at,
         students ( id, name ),
-        sessions ( id, batch_id, date, start_time, end_time )
-      `).order("marked_at", { ascending: false }).limit(200);
+        sessions ( id, batch_id, date, start, "end" )
+      `).order("created_at", { ascending: false }).limit(200);
 
       // Optional filters
       if (req.query.batch_id) query.eq("sessions.batch_id", req.query.batch_id);
@@ -589,38 +717,47 @@ app.get("/api/attendance", async (req, res) => {
       console.error("Supabase attendance error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
-app.post("/api/attendance", requireAuth, async (req, res) => {
+app.post("/api/attendance", requireAuth, requireRole("owner"), async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
 
   const { session_id, records } = req.body;
   // records = [{ student_id, status }]
-  if (!session_id || !Array.isArray(records)) {
-    return res.status(400).json({ success: false, error: "session_id and records[] are required" });
+  if (typeof session_id !== "string" || !session_id.trim() || !Array.isArray(records) || records.length !== 1) {
+    return res.status(400).json({ success: false, error: "An owner may mark one record at a time; bulk attendance must use the approval workflow." });
   }
 
   try {
+    const statusMap = { present: "Present", absent: "Absent", late: "Late" };
     const rows = records.map((r) => ({
-      id: `ATT-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      id: `ATT-${randomUUID()}`,
       session_id,
-      student_id: r.student_id,
-      status: r.status || "present",
-      marked_at: new Date().toISOString(),
-      marked_by: req.user?.id || "system",
+      student_id: typeof r?.student_id === "string" ? r.student_id.trim() : "",
+      status: statusMap[String(r?.status || "present").toLowerCase()],
+      checkin_at: new Date().toISOString(),
     }));
+    if (rows.some((row) => !row.student_id || !row.status)) {
+      return res.status(400).json({ success: false, error: "Each attendance record needs a student_id and a valid Present, Absent, or Late status." });
+    }
 
-    const { data, error } = await supabase.from("attendance").upsert(rows, {
+    if (!await writeRequiredAudit(req, res, "attendance.mark_attempt", {
+      sessionId: session_id,
+      studentId: rows[0].student_id,
+      status: rows[0].status,
+    })) return;
+
+    const { data, error } = await req.supabase.from("attendance").upsert(rows, {
       onConflict: "session_id,student_id",
-    }).select();
+    }).select("id,session_id,student_id,status,checkin_at,created_at");
 
     if (error) throw error;
-    res.json({ success: true, count: data.length, data });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
+    return res.json({ success: true, count: data.length, data });
+  } catch {
+    return res.status(502).json({ success: false, error: "The attendance record could not be saved." });
   }
 });
 
@@ -628,105 +765,96 @@ app.post("/api/attendance", requireAuth, async (req, res) => {
 app.get("/api/trainers", async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase.from("trainers").select(`
-        id, name, email, phone, specialization, status, created_at,
-        trainer_availability ( day_of_week, start_time, end_time )
+      const { data, error } = await req.supabase.from("trainers").select(`
+        id, name, skills, weekly_hours_max, created_at,
+        trainer_availability ( weekday, start, "end" )
       `).order("name", { ascending: true });
       if (!error) return res.json({ success: true, count: data.length, data });
     } catch (err) {
       console.error("Supabase trainers error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
 // 8. Courses
 app.get("/api/courses", async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase.from("courses").select("*").order("name", { ascending: true });
+      const { data, error } = await req.supabase.from("course_catalog").select("id, name, duration_weeks").order("name", { ascending: true });
       if (!error) return res.json({ success: true, count: data.length, data });
     } catch (err) {
       console.error("Supabase courses error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
 // 9. Audit Log (owner only)
 app.get("/api/audit-log", requireAuth, requireRole("owner"), async (req, res) => {
   if (supabase) {
     try {
-      const limit = Math.min(parseInt(req.query.limit) || 50, 200);
-      const { data, error } = await supabase.from("audit_log")
-        .select("*")
-        .order("ts", { ascending: false })
-        .limit(limit);
+      const rawLimit = req.query.limit === undefined ? 50 : Number(req.query.limit);
+      if (!Number.isInteger(rawLimit) || rawLimit < 1 || rawLimit > 200) {
+        return res.status(400).json({ success: false, error: "limit must be an integer from 1 to 200." });
+      }
+      if (req.query.role && !["owner", "counselor", "trainer", "accounts"].includes(req.query.role)) {
+        return res.status(400).json({ success: false, error: "Unsupported audit role filter." });
+      }
+      if (req.query.event && (typeof req.query.event !== "string" || req.query.event.length > 120)) {
+        return res.status(400).json({ success: false, error: "event filter is too long." });
+      }
+      let query = req.supabase.from("audit_log")
+        .select("id,at,user_id,role,event,detail,institute_id")
+        .order("at", { ascending: false })
+        .limit(rawLimit);
+      if (req.query.role) query = query.eq("role", req.query.role);
+      if (req.query.event && req.query.event !== "All events") query = query.eq("event", req.query.event);
+      const { data, error } = await query;
       if (!error) return res.json({ success: true, count: data.length, data });
     } catch (err) {
       console.error("Supabase audit_log error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
 // 10. User Profile (authenticated user)
 app.get("/api/profile", requireAuth, async (req, res) => {
-  if (supabase) {
-    try {
-      const { data, error } = await supabase.from("user_profiles")
-        .select("id, role, name, avatar_url, created_at, updated_at")
-        .eq("id", req.user.id)
-        .single();
-      if (!error && data) return res.json({ success: true, data });
-    } catch (err) {
-      console.error("Profile fetch error:", err);
-    }
-  }
-  // Demo fallback
-  res.json({
+  return res.json({
     success: true,
-    data: { id: req.user?.id || "demo", role: req.role, name: "Demo User", avatar_url: null },
+    data: {
+      id: req.user.id,
+      email: req.user.email || null,
+      name: req.user.user_metadata?.name || req.user.email?.split("@")[0] || "",
+      role: req.role,
+      avatar_url: null,
+    },
   });
 });
 
 app.put("/api/profile", requireAuth, async (req, res) => {
-  if (!supabase) {
-    return res.status(503).json({ success: false, message: "Supabase credentials required" });
-  }
-
-  const { name, avatar_url } = req.body;
-  try {
-    const { data, error } = await supabase.from("user_profiles")
-      .update({ name, avatar_url, updated_at: new Date().toISOString() })
-      .eq("id", req.user.id)
-      .select()
-      .single();
-    if (error) throw error;
-    res.json({ success: true, data });
-  } catch (err) {
-    res.status(500).json({ success: false, error: err.message });
-  }
+  return res.status(501).json({ success: false, error: "Profile editing is not connected to a persistent profile store." });
 });
 
 // 11. Rooms (for timetable scheduling and capacity check)
 app.get("/api/rooms", async (req, res) => {
   if (supabase) {
     try {
-      const { data, error } = await supabase.from("rooms").select("*").order("name", { ascending: true });
+      const { data, error } = await req.supabase.from("rooms").select("*").order("name", { ascending: true });
       if (!error) return res.json({ success: true, count: data.length, data });
     } catch (err) {
       console.error("Supabase rooms error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
 // 12. Sessions / Timetable
 app.get("/api/sessions", async (req, res) => {
   if (supabase) {
     try {
-      let query = supabase.from("sessions").select(`
+      let query = req.supabase.from("sessions").select(`
         id, batch_id, date, start, "end", created_at,
         batches ( id, name, mode, room_id, course_name, trainer_name )
       `).order("date", { ascending: true });
@@ -741,7 +869,7 @@ app.get("/api/sessions", async (req, res) => {
       console.error("Supabase sessions error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
 app.post("/api/sessions", requireAuth, requireRole("owner", "counselor", "trainer"), async (req, res) => {
@@ -753,10 +881,11 @@ app.post("/api/sessions", requireAuth, requireRole("owner", "counselor", "traine
   if (!batch_id || !date || !start || !end) {
     return res.status(400).json({ success: false, error: "batch_id, date, start, and end are required" });
   }
+  if (!await writeRequiredAudit(req, res, "session.create_attempt", { batchId: batch_id })) return;
 
   try {
     const sessionId = id || `SES-${Date.now().toString().slice(-6)}`;
-    const { data, error } = await supabase.from("sessions").upsert({
+    const { data, error } = await req.supabase.from("sessions").upsert({
       id: sessionId,
       batch_id,
       date,
@@ -771,11 +900,39 @@ app.post("/api/sessions", requireAuth, requireRole("owner", "counselor", "traine
   }
 });
 
+app.patch("/api/sessions/:id", requireRole("owner", "counselor", "trainer"), async (req, res) => {
+  const { date, start, end } = req.body;
+  if (!date || !start || !end) return res.status(400).json({ success: false, error: "date, start, and end are required." });
+  if (!await writeRequiredAudit(req, res, "session.update_attempt", { sessionId: req.params.id })) return;
+  try {
+    const { data, error } = await req.supabase.from("sessions")
+      .update({ date, start, end })
+      .eq("id", req.params.id)
+      .select()
+      .single();
+    if (error) throw error;
+    return res.json({ success: true, data });
+  } catch {
+    return res.status(502).json({ success: false, error: "The session could not be updated." });
+  }
+});
+
+app.delete("/api/sessions/:id", requireRole("owner"), async (req, res) => {
+  if (!await writeRequiredAudit(req, res, "session.delete_attempt", { sessionId: req.params.id })) return;
+  try {
+    const { error } = await req.supabase.from("sessions").delete().eq("id", req.params.id);
+    if (error) throw error;
+    return res.json({ success: true, data: { id: req.params.id } });
+  } catch {
+    return res.status(502).json({ success: false, error: "The session could not be deleted." });
+  }
+});
+
 // 13. Approvals Workflow
 app.get("/api/approvals", requireAuth, async (req, res) => {
   if (supabase) {
     try {
-      let query = supabase.from("approvals").select("*").order("created_at", { ascending: false });
+      let query = req.supabase.from("approvals").select("*").order("created_at", { ascending: false });
       if (req.query.status) query = query.eq("status", req.query.status);
       const { data, error } = await query;
       if (!error) return res.json({ success: true, count: data.length, data });
@@ -783,24 +940,40 @@ app.get("/api/approvals", requireAuth, async (req, res) => {
       console.error("Supabase approvals error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
 app.post("/api/approvals", requireAuth, async (req, res) => {
-  if (!supabase) {
-    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+  if (!supabaseServiceRole) {
+    return res.status(503).json({ success: false, error: "The audited approval service is not configured." });
   }
 
   const { id, kind, payload, preview } = req.body;
+  if (typeof kind !== "string" || !kind.trim() || kind.length > 120
+      || typeof preview !== "string" || preview.length > 8000) {
+    return res.status(400).json({ success: false, error: "A valid approval kind and preview are required." });
+  }
+  const allowedRequest = req.authContext.role === "owner"
+    || req.authContext.role === "counselor"
+    || (req.authContext.role === "trainer" && kind.startsWith("attendance_"))
+    || (req.authContext.role === "accounts" && ["fee_reconciliation", "fee_action"].includes(kind));
+  if (!allowedRequest) return res.status(403).json({ success: false, error: "This role cannot request the selected approval." });
+
   try {
-    const approvalId = id || `APP-${Date.now().toString().slice(-6)}`;
-    const { data, error } = await supabase.from("approvals").insert({
+    const approvalId = typeof id === "string" && id.length <= 120 ? id : `APP-${randomUUID()}`;
+    if (preview && !await writeRequiredAudit(req, res, "copilot.preview_attempt", {
+      approvalId,
+      kind,
+      previewLength: preview.length,
+    })) return;
+    if (!await writeRequiredAudit(req, res, "approval.request_attempt", { approvalId, kind })) return;
+    const { data, error } = await supabaseServiceRole.from("approvals").insert({
       id: approvalId,
-      kind: kind || "general",
+      institute_id: req.authContext.instituteId,
+      kind,
       payload: payload || {},
       preview: preview || "",
-      status: "pending",
-      requested_by: req.user?.id || null,
+      requested_by: req.authContext.userId,
     }).select().single();
 
     if (error) throw error;
@@ -810,9 +983,9 @@ app.post("/api/approvals", requireAuth, async (req, res) => {
   }
 });
 
-app.patch("/api/approvals/:id", requireAuth, requireRole("owner"), async (req, res) => {
-  if (!supabase) {
-    return res.status(503).json({ success: false, message: "Supabase credentials required" });
+app.patch("/api/approvals/:id", requireAuth, requireRole("owner", "accounts"), async (req, res) => {
+  if (!supabaseServiceRole) {
+    return res.status(503).json({ success: false, error: "The audited approval service is not configured." });
   }
 
   const { status } = req.body;
@@ -821,13 +994,57 @@ app.patch("/api/approvals/:id", requireAuth, requireRole("owner"), async (req, r
   }
 
   try {
-    const { data, error } = await supabase.from("approvals")
+    const { data: existing, error: readError } = await supabaseServiceRole.from("approvals")
+      .select("id,institute_id,kind,status,payload")
+      .eq("id", req.params.id)
+      .eq("institute_id", req.authContext.instituteId)
+      .maybeSingle();
+    if (readError) throw readError;
+    if (!existing) return res.status(404).json({ success: false, error: "Approval was not found." });
+    if (existing.status !== "pending") return res.status(409).json({ success: false, error: "Approval is no longer pending." });
+    if (req.authContext.role === "accounts" && !["fee_reconciliation", "fee_action"].includes(existing.kind)) {
+      return res.status(403).json({ success: false, error: "Accounts may decide fee approvals only." });
+    }
+    let approvedPayload;
+    if (Object.hasOwn(req.body || {}, "payload")) {
+      if (status !== "approved" || existing.kind !== "whatsapp_reminders") {
+        return res.status(400).json({ success: false, error: "Only an approved WhatsApp preview may include edited messages." });
+      }
+      try {
+        approvedPayload = withApprovedReminderMessages(existing.payload, req.body.payload);
+      } catch (error) {
+        return res.status(400).json({ success: false, error: error.message });
+      }
+    }
+    if (status === "approved") {
+      if (!await writeRequiredAudit(req, res, "approval.execution_blocked", {
+        approvalId: existing.id,
+        kind: existing.kind,
+        reason: "transactional_action_executor_unavailable",
+      })) return;
+      return res.status(501).json({
+        success: false,
+        error: "This approval remains pending because its action cannot yet be applied transactionally.",
+      });
+    }
+    const event = status === "approved" ? "copilot.approval_attempt" : "copilot.rejection_attempt";
+    const auditDetails = { approvalId: existing.id, kind: existing.kind, decision: status };
+    if (approvedPayload) {
+      auditDetails.editedPayloadHash = createHash("sha256").update(JSON.stringify(approvedPayload)).digest("hex");
+      auditDetails.recipientCount = approvedPayload.recipients.length;
+    }
+    if (!await writeRequiredAudit(req, res, event, auditDetails)) return;
+
+    const { data, error } = await supabaseServiceRole.from("approvals")
       .update({
         status,
-        decided_by: req.user?.id || null,
-        updated_at: new Date().toISOString(),
+        decided_by: req.authContext.userId,
+        decided_at: new Date().toISOString(),
+        ...(approvedPayload ? { payload: approvedPayload } : {}),
       })
       .eq("id", req.params.id)
+      .eq("institute_id", req.authContext.instituteId)
+      .eq("status", "pending")
       .select()
       .single();
 
@@ -842,43 +1059,47 @@ app.patch("/api/approvals/:id", requireAuth, requireRole("owner"), async (req, r
 app.get("/api/assignments", async (req, res) => {
   if (supabase) {
     try {
-      let query = supabase.from("assignments").select(`
-        id, batch_id, title, due_date, max_score, created_at,
+      let query = req.supabase.from("assignments").select(`
+        id, batch_id, title, due_date:due, created_at,
         batches ( id, name, course_name )
-      `).order("due_date", { ascending: true });
+      `).order("due", { ascending: true });
 
       if (req.query.batch_id) query = query.eq("batch_id", req.query.batch_id);
       const { data, error } = await query;
-      if (!error) return res.json({ success: true, count: data.length, data });
+      if (!error) {
+        const assignments = data.map((assignment) => ({ ...assignment, max_score: 100 }));
+        return res.json({ success: true, count: assignments.length, data: assignments });
+      }
     } catch (err) {
       console.error("Supabase assignments error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
-app.post("/api/assignments", requireAuth, requireRole("owner", "trainer"), async (req, res) => {
+app.post("/api/assignments", requireAuth, requireRole("owner", "counselor", "trainer"), async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
 
-  const { id, batch_id, title, due_date, max_score } = req.body;
-  if (!batch_id || !title || !due_date) {
+  const { id, batch_id, title, due_date, due } = req.body;
+  const assignmentDue = due_date || due;
+  if (!batch_id || !title || !assignmentDue) {
     return res.status(400).json({ success: false, error: "batch_id, title, and due_date are required" });
   }
+  if (!await writeRequiredAudit(req, res, "assignment.create_attempt", { batchId: batch_id, assignmentId: typeof id === "string" ? id : null })) return;
 
   try {
     const assignmentId = id || `ASN-${Date.now().toString().slice(-6)}`;
-    const { data, error } = await supabase.from("assignments").upsert({
+    const { data, error } = await req.supabase.from("assignments").upsert({
       id: assignmentId,
       batch_id,
       title,
-      due_date,
-      max_score: Number(max_score) || 100,
-    }).select().single();
+      due: assignmentDue,
+    }).select("id,batch_id,title,due,created_at").single();
 
     if (error) throw error;
-    res.json({ success: true, data });
+    res.json({ success: true, data: { ...data, due_date: data.due, max_score: 100 } });
   } catch (err) {
     res.status(500).json({ success: false, error: err.message });
   }
@@ -887,44 +1108,53 @@ app.post("/api/assignments", requireAuth, requireRole("owner", "trainer"), async
 app.get("/api/submissions", async (req, res) => {
   if (supabase) {
     try {
-      let query = supabase.from("submissions").select(`
-        id, assignment_id, student_id, score, status, submitted_at,
+      let query = req.supabase.from("submissions").select(`
+        id, assignment_id, student_id, score, submitted_at,
         students ( id, name ),
-        assignments ( id, title, batch_id, max_score )
+        assignments ( id, title, batch_id, due )
       `).order("submitted_at", { ascending: false });
 
       if (req.query.assignment_id) query = query.eq("assignment_id", req.query.assignment_id);
       if (req.query.student_id) query = query.eq("student_id", req.query.student_id);
 
       const { data, error } = await query;
-      if (!error) return res.json({ success: true, count: data.length, data });
+      if (!error) {
+        const submissions = data.map((submission) => ({
+          ...submission,
+          status: submission.score == null ? "submitted" : "graded",
+          assignments: submission.assignments
+            ? { ...submission.assignments, max_score: 100 }
+            : submission.assignments,
+        }));
+        return res.json({ success: true, count: submissions.length, data: submissions });
+      }
     } catch (err) {
       console.error("Supabase submissions error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
-app.post("/api/submissions", requireAuth, async (req, res) => {
+app.post("/api/submissions", requireAuth, requireRole("owner", "counselor", "trainer"), async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
 
-  const { id, assignment_id, student_id, score, status } = req.body;
+  const { id, assignment_id, student_id, score } = req.body;
   if (!assignment_id || !student_id) {
     return res.status(400).json({ success: false, error: "assignment_id and student_id are required" });
   }
+  if (!await writeRequiredAudit(req, res, "submission.create_attempt", { assignmentId: assignment_id, studentId: student_id })) return;
 
   try {
     const submissionId = id || `SUB-${Date.now().toString().slice(-6)}`;
-    const { data, error } = await supabase.from("submissions").upsert({
+    const { data, error } = await req.supabase.from("submissions").upsert({
       id: submissionId,
       assignment_id,
       student_id,
       score: score !== undefined ? Number(score) : null,
-      status: status || "graded",
       submitted_at: new Date().toISOString(),
-    }).select().single();
+    }).select("id,assignment_id,student_id,score,submitted_at").single();
 
     if (error) throw error;
     res.json({ success: true, data });
@@ -937,7 +1167,7 @@ app.post("/api/submissions", requireAuth, async (req, res) => {
 app.get("/api/recordings", async (req, res) => {
   if (supabase) {
     try {
-      let query = supabase.from("recordings").select(`
+      let query = req.supabase.from("recordings").select(`
         id, session_id, url, duration_min, created_at,
         sessions ( id, batch_id, date, start, "end" )
       `).order("created_at", { ascending: false });
@@ -949,10 +1179,10 @@ app.get("/api/recordings", async (req, res) => {
       console.error("Supabase recordings error:", err);
     }
   }
-  res.json({ success: true, count: 0, data: [] });
+  return res.status(502).json({ success: false, error: "Supabase data is temporarily unavailable." });
 });
 
-app.post("/api/recordings", requireAuth, requireRole("owner", "trainer"), async (req, res) => {
+app.post("/api/recordings", requireAuth, requireRole("owner", "counselor", "trainer"), async (req, res) => {
   if (!supabase) {
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
@@ -961,10 +1191,11 @@ app.post("/api/recordings", requireAuth, requireRole("owner", "trainer"), async 
   if (!session_id || !url) {
     return res.status(400).json({ success: false, error: "session_id and url are required" });
   }
+  if (!await writeRequiredAudit(req, res, "recording.create_attempt", { sessionId: session_id, recordingId: typeof id === "string" ? id : null })) return;
 
   try {
     const recordingId = id || `REC-${Date.now().toString().slice(-6)}`;
-    const { data, error } = await supabase.from("recordings").upsert({
+    const { data, error } = await req.supabase.from("recordings").upsert({
       id: recordingId,
       session_id,
       url,
@@ -984,19 +1215,21 @@ app.post("/api/trainers", requireAuth, requireRole("owner"), async (req, res) =>
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
 
-  const { id, name, email, phone, specialization, status } = req.body;
+  const { id, name, auth_user_id, skills, specialization, weekly_hours_max } = req.body;
   if (!name) return res.status(400).json({ success: false, error: "Trainer name is required" });
+  if (!await writeRequiredAudit(req, res, "trainer.create_attempt", { trainerId: typeof id === "string" ? id : null })) return;
 
   try {
     const trainerId = id || `TRN-${Date.now().toString().slice(-4)}`;
-    const { data, error } = await supabase.from("trainers").upsert({
+    const trainerRow = {
       id: trainerId,
       name,
-      email: email || "",
-      phone: phone || "",
-      specialization: specialization || "General",
-      status: status || "active",
-    }).select().single();
+      skills: skills || specialization || "General",
+      weekly_hours_max: Number(weekly_hours_max) || 24,
+    };
+    if (Object.hasOwn(req.body, "auth_user_id")) trainerRow.auth_user_id = auth_user_id || null;
+    const { data, error } = await req.supabase.from("trainers").upsert(trainerRow)
+      .select("id,name,skills,weekly_hours_max,created_at").single();
 
     if (error) throw error;
     res.json({ success: true, data });
@@ -1010,19 +1243,18 @@ app.post("/api/courses", requireAuth, requireRole("owner"), async (req, res) => 
     return res.status(503).json({ success: false, message: "Supabase credentials required" });
   }
 
-  const { id, name, code, track, duration_weeks, fee_default } = req.body;
+  const { id, name, duration_weeks, fee_total, fee_default } = req.body;
   if (!name) return res.status(400).json({ success: false, error: "Course name is required" });
+  if (!await writeRequiredAudit(req, res, "course.create_attempt", { courseId: typeof id === "string" ? id : null })) return;
 
   try {
     const courseId = id || `CRS-${Date.now().toString().slice(-4)}`;
-    const { data, error } = await supabase.from("courses").upsert({
+    const { data, error } = await req.supabase.from("courses").upsert({
       id: courseId,
       name,
-      code: code || name.slice(0, 3).toUpperCase(),
-      track: track || "Technical",
       duration_weeks: Number(duration_weeks) || 12,
-      fee_default: Number(fee_default) || 45000,
-    }).select().single();
+      fee_total: Number(fee_total ?? fee_default) || 45000,
+    }).select("id,name,duration_weeks,created_at").single();
 
     if (error) throw error;
     res.json({ success: true, data });
@@ -1038,10 +1270,11 @@ app.post("/api/rooms", requireAuth, requireRole("owner"), async (req, res) => {
 
   const { id, name, capacity } = req.body;
   if (!name) return res.status(400).json({ success: false, error: "Room name is required" });
+  if (!await writeRequiredAudit(req, res, "room.create_attempt", { roomId: typeof id === "string" ? id : null })) return;
 
   try {
     const roomId = id || `RM-${Date.now().toString().slice(-4)}`;
-    const { data, error } = await supabase.from("rooms").upsert({
+    const { data, error } = await req.supabase.from("rooms").upsert({
       id: roomId,
       name,
       capacity: Number(capacity) || 30,
@@ -1056,69 +1289,155 @@ app.post("/api/rooms", requireAuth, requireRole("owner"), async (req, res) => {
 
 // 17. Audit Log Recording
 app.post("/api/audit-log", requireAuth, async (req, res) => {
-  const { action, table_name, record_id, details } = req.body;
-  const auditId = `AUD-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
+  return res.status(405).json({ success: false, error: "Audit events are written only by protected server operations." });
+});
 
-  if (supabase) {
+app.post("/api/audit-log/export", requireAuth, async (req, res) => {
+  const { resource, format = "csv", filters = {} } = req.body || {};
+  if (!new Set(["attendance", "audit_log", "student_records"]).has(resource) || format !== "csv") {
+    return res.status(400).json({ success: false, error: "Unsupported export request." });
+  }
+  if (!filters || typeof filters !== "object" || Array.isArray(filters)
+      || Object.keys(filters).some((key) => !["query", "role", "event"].includes(key))
+      || (filters.query !== undefined && (typeof filters.query !== "string" || filters.query.length > 100))
+      || (filters.role !== undefined && filters.role !== "All roles" && !["owner", "counselor", "trainer", "accounts"].includes(filters.role))
+      || (filters.event !== undefined && (typeof filters.event !== "string" || filters.event.length > 120))) {
+    return res.status(400).json({ success: false, error: "Unsupported export filters." });
+  }
+  if (resource === "audit_log" && req.authContext.role !== "owner") {
+    return res.status(403).json({ success: false, error: "Only an owner can export the audit log." });
+  }
+  if (!await writeRequiredAudit(req, res, "data.export_attempt", { resource, format, filtered: Object.keys(filters).length > 0 })) return;
+  if (resource === "audit_log") {
+    if (!supabase) return res.status(503).json({ success: false, error: "Supabase data is temporarily unavailable." });
     try {
-      await supabase.from("audit_log").insert({
-        id: auditId,
-        actor_id: req.user?.id || "unknown",
-        actor_role: req.role || "unknown",
-        action: action || "general_action",
-        table_name: table_name || "system",
-        record_id: record_id || "",
-        details: details || {},
-        ts: new Date().toISOString(),
-      });
-    } catch (err) {
-      console.warn("Supabase audit log insert error:", err.message);
+      let query = req.supabase.from("audit_log")
+        .select("id,at,user_id,role,event,detail,institute_id")
+        .order("at", { ascending: false })
+        .limit(5001);
+      if (filters.role && filters.role !== "All roles") query = query.eq("role", filters.role);
+      if (filters.event && filters.event !== "All events") query = query.eq("event", filters.event);
+      const { data, error } = await query;
+      if (error || !Array.isArray(data)) return res.status(502).json({ success: false, error: "The audit export could not be loaded." });
+      if (data.length > 5000) return res.status(413).json({ success: false, error: "The audit export exceeds 5,000 rows; add filters and try again." });
+      const search = (filters.query || "").trim().toLocaleLowerCase();
+      const filtered = search
+        ? data.filter((entry) => [entry.event, entry.detail, entry.user_id, entry.role].some((value) => String(value || "").toLocaleLowerCase().includes(search)))
+        : data;
+      res.type("text/csv");
+      res.attachment("instituteos-audit-log.csv");
+      return res.send(auditRowsToCsv(filtered));
+    } catch {
+      return res.status(502).json({ success: false, error: "The audit export could not be loaded." });
     }
   }
-
-  res.json({ success: true, message: "Audit event recorded", id: auditId });
+  return res.json({ success: true });
 });
 
 // 18. AI Copilot Execution Gateway
-app.post("/api/copilot/query", requireAuth, async (req, res) => {
-  const { prompt, intent } = req.body;
-  const userRole = req.role || "counselor";
+export function isFinancialCopilotRequest(prompt, intent = "") {
+  return isTrainerFinanceQuestion(prompt)
+    || /fee|emi|payment/i.test(String(intent || ""));
+}
 
-  // Enforce role permission boundaries on backend
-  const blockedFinanceRoles = ["trainer"];
-  const isFinance = intent?.includes("fee") || intent?.includes("emi") || prompt?.toLowerCase().includes("fee") || prompt?.toLowerCase().includes("emi");
-
-  if (isFinance && blockedFinanceRoles.includes(userRole)) {
-    return res.status(403).json({
-      success: false,
-      error: "Financial queries are restricted from Trainer accounts under institute security policy.",
-    });
+app.post("/api/copilot/audit", requireAuth, async (req, res) => {
+  const event = req.body?.event;
+  const detail = req.body?.detail;
+  if (!["copilot.local_query", "copilot.local_answer"].includes(event) || !detail || typeof detail !== "object" || Array.isArray(detail)) {
+    return res.status(400).json({ success: false, error: "Unsupported Copilot audit event." });
   }
-
-  // Automatic audit logging
-  if (supabase) {
-    try {
-      await supabase.from("audit_log").insert({
-        id: `AUD-COPILOT-${Date.now()}`,
-        actor_id: req.user?.id || "demo",
-        actor_role: userRole,
-        action: "copilot_query",
-        table_name: "copilot",
-        details: { prompt, intent },
-        ts: new Date().toISOString(),
-      });
-    } catch {}
+  const safeDetail = {};
+  if (event === "copilot.local_query") {
+    if (typeof detail.sql !== "string" || detail.sql.length > 12000) return res.status(400).json({ success: false, error: "A bounded SQL statement is required." });
+    safeDetail.sql = detail.sql;
+    safeDetail.rowCount = Math.max(0, Math.min(Number(detail.rowCount) || 0, 200));
+    safeDetail.promptVersion = PROMPT_VERSION;
+  } else {
+    safeDetail.promptHash = typeof detail.promptHash === "string" ? detail.promptHash.slice(0, 64) : "";
+    safeDetail.mode = "local";
+    safeDetail.promptVersion = PROMPT_VERSION;
   }
+  if (!await writeRequiredAudit(req, res, event, safeDetail)) return;
+  return res.json({ success: true });
+});
 
-  res.json({
-    success: true,
-    data: {
-      prompt,
-      role: userRole,
-      status: "verified",
-      message: "Query verified and processed through role-scoped backend pipeline.",
-    },
+app.post("/api/copilot/feedback", requireAuth, async (req, res) => {
+  const { answerId, feedback } = req.body || {};
+  if (typeof answerId !== "string" || answerId.length > 120 || !["up", "down"].includes(feedback)) {
+    return res.status(400).json({ success: false, error: "A valid answer ID and feedback value are required." });
+  }
+  if (!await writeRequiredAudit(req, res, "copilot.feedback", { answerId, feedback, promptVersion: PROMPT_VERSION })) return;
+  return res.json({ success: true });
+});
+
+app.post("/api/copilot/chat", requireAuth, async (req, res) => {
+  const question = req.body?.question;
+  if (typeof question !== "string" || !question.trim() || question.length > 4000) {
+    return res.status(400).json({ success: false, error: "A question of up to 4,000 characters is required." });
+  }
+  const controller = new AbortController();
+  req.once("aborted", () => controller.abort());
+  res.once("close", () => { if (!res.writableEnded) controller.abort(); });
+  res.status(200);
+  res.set({
+    "Content-Type": "text/event-stream; charset=utf-8",
+    "Cache-Control": "no-cache, no-transform",
+    Connection: "keep-alive",
+    "X-Accel-Buffering": "no",
   });
+  res.flushHeaders?.();
+  const send = (event, payload) => {
+    if (!res.writableEnded) res.write(`event: ${event}\ndata: ${JSON.stringify(payload)}\n\n`);
+  };
+  try {
+    const result = await copilotService.run(req, question.trim(), { signal: controller.signal, emit: (event, payload) => send(event, payload) });
+    if (result.queryResult) send("query", result.queryResult);
+    const answer = result.answer || "I could not complete that request.";
+    if (!result.fallbackAvailable && !result.streamedText) {
+      for (let index = 0; index < answer.length; index += 48) send("token", { text: answer.slice(index, index + 48) });
+    }
+    send("complete", {
+      mode: result.mode,
+      dataMode: result.dataMode || "none",
+      answer,
+      refusal: Boolean(result.refusal),
+      fallbackAvailable: Boolean(result.fallbackAvailable),
+      unavailableReason: result.unavailableReason || null,
+      sql: result.queryResult?.sql || null,
+      columns: result.queryResult?.columns || [],
+      rows: result.queryResult?.rows || [],
+      truncated: Boolean(result.queryResult?.truncated),
+      actionPreview: result.actionPreview || null,
+      followups: result.followups || [],
+      promptVersion: result.promptVersion || PROMPT_VERSION,
+      answerId: result.answerId || randomUUID(),
+    });
+    res.end();
+  } catch (error) {
+    if (error instanceof CopilotFallbackRequired && error.message === "audit-unavailable") {
+      if (!res.headersSent) res.status(503);
+      send("error", { error: "Copilot audit logging is unavailable; the request was not processed." });
+    } else if (Number.isInteger(error?.status)) {
+      send("error", { error: error.message, status: error.status });
+    } else {
+      send("error", { error: "The Copilot request could not be completed." });
+    }
+    res.end();
+  }
+});
+
+// Compatibility endpoint for older clients. New clients use the SSE route.
+app.post("/api/copilot/query", requireAuth, async (req, res) => {
+  const prompt = req.body?.prompt;
+  if (typeof prompt !== "string" || !prompt.trim() || prompt.length > 4000) {
+    return res.status(400).json({ success: false, error: "A prompt of up to 4,000 characters is required." });
+  }
+  try {
+    const result = await copilotService.run(req, prompt.trim());
+    return res.json({ success: true, data: result });
+  } catch (error) {
+    return res.status(Number.isInteger(error?.status) ? error.status : 503).json({ success: false, error: "The Copilot request could not be completed." });
+  }
 });
 
 // 19. System Status & Diagnostics
@@ -1129,7 +1448,7 @@ app.get("/api/system/status", async (req, res) => {
     nodeVersion: process.version,
     timestamp: new Date().toISOString(),
     supabase: {
-      connected: Boolean(supabase),
+      configured: Boolean(supabase),
       url: supabaseUrl ? `${supabaseUrl.slice(0, 15)}...` : "not configured",
     },
     tables: {},
@@ -1137,11 +1456,12 @@ app.get("/api/system/status", async (req, res) => {
 
   if (supabase) {
     try {
-      const tablesToCheck = ["users", "students", "batches", "courses", "trainers", "rooms", "instalments", "attendance"];
+      const tablesToCheck = ["users", "students", "batches", "courses", "trainers", "rooms", "attendance"];
+      if (["owner", "accounts"].includes(req.role)) tablesToCheck.push("instalments");
       const counts = await Promise.all(
         tablesToCheck.map(async (tbl) => {
           try {
-            const { count, error } = await supabase.from(tbl).select("id", { count: "exact", head: true });
+            const { count, error } = await req.supabase.from(tbl).select("id", { count: "exact", head: true });
             return [tbl, error ? "error" : count ?? 0];
           } catch {
             return [tbl, "unavailable"];
@@ -1155,6 +1475,18 @@ app.get("/api/system/status", async (req, res) => {
   }
 
   res.json({ success: true, data: status });
+});
+
+app.use((error, req, res, next) => {
+  if (res.headersSent) return next(error);
+  console.error("API request failed:", error?.name || "Error");
+  if (error?.type === "entity.too.large" || error?.status === 413) {
+    return res.status(413).json({ success: false, error: "Request body exceeds the 256 KB limit." });
+  }
+  if (error?.type === "entity.parse.failed") {
+    return res.status(400).json({ success: false, error: "Request body must be valid JSON." });
+  }
+  return res.status(500).json({ success: false, error: "The request could not be completed." });
 });
 
 if (process.env.NODE_ENV !== "test") {

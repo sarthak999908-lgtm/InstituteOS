@@ -4,6 +4,7 @@ import { dataSeed, students } from "../../data/mockData.js";
 import { createApproval, decideApproval } from "../../services/api.js";
 import { parseStatementCsv, reconcileStatement } from "./reconcile.js";
 import "./fees.css";
+import { appStorageKey } from "../../lib/localDemo.js";
 
 function paymentCandidates() {
   const studentNames = new Map(students.map((student) => [student.id, student.name]));
@@ -58,8 +59,9 @@ export default function ReconciliationPanel({ role, userId }) {
     if (!pendingApproval) return;
     await decideApproval(pendingApproval.id, decision);
     if (decision === "approve") {
-      const prior = JSON.parse(localStorage.getItem("instituteos_approved_reconciliations") || "[]");
-      localStorage.setItem("instituteos_approved_reconciliations", JSON.stringify([...prior, ...matched]));
+      const storageKey = appStorageKey("instituteos_approved_reconciliations");
+      const prior = JSON.parse(localStorage.getItem(storageKey) || "[]");
+      localStorage.setItem(storageKey, JSON.stringify([...prior, ...matched]));
       setStatus(`${matched.length} matched row${matched.length === 1 ? "" : "s"} approved and recorded locally.`);
     } else {
       setStatus("Reconciliation matches rejected; no payment records were changed.");

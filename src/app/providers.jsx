@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from "react";
+import { appStorageKey } from "../lib/localDemo.js";
 
 const ThemeContext = createContext({
   theme: "light",
@@ -14,7 +15,7 @@ export function ThemeProvider({ children }) {
   // Theme state: 'light' | 'dark' | 'system' (Default is light)
   const [theme, setThemeState] = useState(() => {
     try {
-      return localStorage.getItem("instituteos_theme") || "light";
+      return localStorage.getItem(appStorageKey("instituteos_theme")) || "light";
     } catch {
       return "light";
     }
@@ -22,7 +23,7 @@ export function ThemeProvider({ children }) {
 
   const [resolvedTheme, setResolvedTheme] = useState(() => {
     if (typeof window === "undefined") return "light";
-    const saved = localStorage.getItem("instituteos_theme") || "light";
+    const saved = localStorage.getItem(appStorageKey("instituteos_theme")) || "light";
     if (saved === "system") {
       return window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light";
     }
@@ -32,7 +33,7 @@ export function ThemeProvider({ children }) {
   // Accent preset: 'ocean' (default) | 'emerald' | 'sunset'
   const [accent, setAccentState] = useState(() => {
     try {
-      return localStorage.getItem("instituteos_accent") || "ocean";
+      return localStorage.getItem(appStorageKey("instituteos_accent")) || "ocean";
     } catch {
       return "ocean";
     }
@@ -41,7 +42,7 @@ export function ThemeProvider({ children }) {
   // Calm mode (no parallax, no loops, fades only)
   const [calmMode, setCalmModeState] = useState(() => {
     try {
-      return localStorage.getItem("instituteos_calm_mode") === "true";
+      return localStorage.getItem(appStorageKey("instituteos_calm_mode")) === "true";
     } catch {
       return false;
     }
@@ -80,7 +81,7 @@ export function ThemeProvider({ children }) {
       setThemeState(newTheme);
       setResolvedTheme(nextResolved);
       try {
-        localStorage.setItem("instituteos_theme", newTheme);
+        localStorage.setItem(appStorageKey("instituteos_theme"), newTheme);
       } catch {}
 
       // Circular Reveal with View Transitions API (450ms)
@@ -121,7 +122,7 @@ export function ThemeProvider({ children }) {
   const setAccent = useCallback((newAccent) => {
     setAccentState(newAccent);
     try {
-      localStorage.setItem("instituteos_accent", newAccent);
+      localStorage.setItem(appStorageKey("instituteos_accent"), newAccent);
     } catch {}
     document.documentElement.setAttribute("data-accent", newAccent);
   }, []);
@@ -129,7 +130,7 @@ export function ThemeProvider({ children }) {
   const setCalmMode = useCallback((boolVal) => {
     setCalmModeState(boolVal);
     try {
-      localStorage.setItem("instituteos_calm_mode", String(boolVal));
+      localStorage.setItem(appStorageKey("instituteos_calm_mode"), String(boolVal));
     } catch {}
     document.documentElement.setAttribute("data-calm-mode", String(boolVal));
   }, []);

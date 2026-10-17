@@ -1,276 +1,183 @@
+import { auditCopilotEvent, streamCopilotBackend } from "./api.js";
+import { getAuthenticatedInstituteContext, supabaseEnabled } from "./supabase.js";
+import { localDemoMode } from "../lib/localDemo.js";
 import { addAuditEntry, createApproval, runRoleQuery } from "../lib/database.js";
-import { canAccessTable, getPolicy } from "../lib/policy.js";
-import {
-  dateWindow,
-  extractBatch,
-  isFinanceQuestion,
-  isIdentityFinanceQuestion,
-  planIntent,
-} from "../features/copilot/planner.js";
+import { dateWindow, detectAction, extractBatch, extractThreshold, isFinanceQuestion, planIntent } from "../features/copilot/planner.js";
 
-const env = import.meta.env || {};
-const dateToday = () => new Date().toISOString().slice(0, 10);
-
-function missingTables(role, tables) {
-  return tables.filter((table) => !canAccessTable(role, table));
-}
-
-function weekWindow(now = new Date()) {
-  return dateWindow("week", now);
-}
-
-function makeQuery(intent, role, question) {
-  const batch = intent.batch ? `%${intent.batch.toLowerCase()}%` : "%";
-  if (intent.intent === "missed_emis") {
-    const { start, end } = weekWindow();
-    return {
-      sql: `SELECT s.id AS student_id, s.name, s.phone, b.name AS batch,
-        (SELECT COUNT(DISTINCT a.session_id) FROM attendance a WHERE a.student_id = s.id AND a.status = ?) AS missed_classes,
-        (SELECT SUM(i.amount - i.paid_amount) FROM instalments i WHERE i.student_id = s.id AND i.status != ? AND i.due_date >= ? AND i.due_date <= ?) AS amount_due,
-        (SELECT MIN(i.due_date) FROM instalments i WHERE i.student_id = s.id AND i.status != ? AND i.due_date >= ? AND i.due_date <= ?) AS due_date
-        FROM students s JOIN batches b ON b.id = s.batch_id
-        WHERE (LOWER(b.name) LIKE ? OR LOWER(b.course_name) LIKE ?)
-          AND (SELECT COUNT(DISTINCT a.session_id) FROM attendance a WHERE a.student_id = s.id AND a.status = ?) >= ?
-          AND EXISTS (SELECT 1 FROM instalments i WHERE i.student_id = s.id AND i.status != ? AND i.due_date >= ? AND i.due_date <= ?)
-        ORDER BY missed_classes DESC, s.name LIMIT 200`,
-      params: ["absent", "paid", start, end, "paid", start, end, batch, batch, "absent", intent.threshold, "paid", start, end],
-      answer: "Students matching the attendance threshold and this week's EMI window.",
-      tables: ["students", "batches", "attendance", "instalments"],
-    };
-  }
-
-  if (intent.intent === "missed_classes" || intent.intent === "dropout_risk") {
-    return {
-      sql: `SELECT s.id AS student_id, s.name, b.name AS batch,
-        (SELECT COUNT(DISTINCT a.session_id) FROM attendance a WHERE a.student_id = s.id AND a.status = ?) AS missed_classes
-        FROM students s JOIN batches b ON b.id = s.batch_id
-        WHERE (LOWER(b.name) LIKE ? OR LOWER(b.course_name) LIKE ?)
-          AND (SELECT COUNT(DISTINCT a.session_id) FROM attendance a WHERE a.student_id = s.id AND a.status = ?) >= ?
-        ORDER BY missed_classes DESC, s.name LIMIT 200`,
-      params: ["absent", batch, batch, "absent", intent.threshold],
-      answer: "Students with repeated missed sessions, ranked by absence count.",
-      tables: ["students", "batches", "attendance"],
-    };
-  }
-
-  if (intent.intent === "emi_due" && role === "counselor") {
-    const { start, end } = dateWindow(intent.period);
-    return {
-      sql: "SELECT course_name, status, due_date, instalment_count, amount_due FROM fee_summary WHERE due_date >= ? AND due_date <= ? ORDER BY due_date LIMIT 200",
-      params: [start, end],
-      answer: "Fee summary by course and due date. Student-level fee details are restricted for counselors.",
-      tables: ["fee_summary"],
-    };
-  }
-
-  if (intent.intent === "emi_due") {
-    const { start, end } = dateWindow(intent.period);
-    return {
-      sql: `SELECT s.id AS student_id, s.name, b.course_name, i.amount - i.paid_amount AS amount_due, i.due_date, i.status
-        FROM instalments i JOIN students s ON s.id = i.student_id JOIN batches b ON b.id = s.batch_id
-        WHERE i.status != ? AND i.amount > i.paid_amount AND i.due_date >= ? AND i.due_date <= ?
-        ORDER BY i.due_date, s.name LIMIT 200`,
-      params: ["paid", start, end],
-      answer: "Students with an unpaid instalment in the selected date window.",
-      tables: ["instalments", "students", "batches"],
-    };
-  }
-
-  if (intent.intent === "fees_collected" && role === "counselor") {
-    return {
-      sql: "SELECT course_name, status, SUM(amount_due) AS amount_collected FROM fee_summary WHERE status = ? GROUP BY course_name, status ORDER BY amount_collected DESC LIMIT 200",
-      params: ["paid"],
-      answer: "Paid fee totals by course. Collection dates and student-level payment records are restricted for counselors.",
-      tables: ["fee_summary"],
-    };
-  }
-
-  if (intent.intent === "fees_collected") {
-    const { start, end } = dateWindow(intent.period);
-    return {
-      sql: `SELECT c.name AS course, SUM(p.amount) AS amount_collected, COUNT(p.id) AS payment_count
-        FROM payments p JOIN students s ON s.id = p.student_id JOIN courses c ON c.id = s.course_id
-        WHERE p.received_on >= ? AND p.received_on <= ? GROUP BY c.name ORDER BY amount_collected DESC LIMIT 200`,
-      params: [`${start}T00:00:00`, `${end}T23:59:59`],
-      answer: "Payment collections for the selected period, grouped by course.",
-      tables: ["payments", "students", "courses"],
-    };
-  }
-
-  if (intent.intent === "trainer_load") {
-    return {
-      sql: "SELECT t.name AS trainer, COUNT(DISTINCT b.id) AS active_batches, SUM(CAST(SUBSTR(b.slot_end, 1, 2) AS INTEGER) - CAST(SUBSTR(b.slot_start, 1, 2) AS INTEGER)) AS scheduled_hours, t.weekly_hours_max FROM trainers t LEFT JOIN batches b ON b.trainer_id = t.id GROUP BY t.id, t.name, t.weekly_hours_max ORDER BY scheduled_hours DESC LIMIT 200",
-      params: [],
-      answer: "Trainer load based on the scheduled weekly batch slots.",
-      tables: ["trainers", "batches"],
-    };
-  }
-
-  if (intent.intent === "free_rooms") {
-    return {
-      sql: "SELECT r.name, r.capacity FROM rooms r ORDER BY r.capacity LIMIT 200",
-      params: [],
-      answer: "Available rooms in the institute inventory. Select a day and time to check slot conflicts on Schedules.",
-      tables: ["rooms"],
-    };
-  }
-
-  if (intent.intent === "absent_today") {
-    return {
-      sql: "SELECT DISTINCT s.name, b.name AS batch, se.date, se.start FROM attendance a JOIN students s ON s.id = a.student_id JOIN sessions se ON se.id = a.session_id JOIN batches b ON b.id = se.batch_id WHERE a.status = ? AND se.date = ? ORDER BY b.name, s.name LIMIT 200",
-      params: ["absent", dateToday()],
-      answer: "Students marked absent in today's sessions.",
-      tables: ["attendance", "students", "sessions", "batches"],
-    };
-  }
-
-  if (intent.intent === "recordings") {
-    return {
-      sql: "SELECT b.name AS batch, se.date, se.start, r.url, r.duration_min FROM recordings r JOIN sessions se ON se.id = r.session_id JOIN batches b ON b.id = se.batch_id WHERE LOWER(b.name) LIKE ? ORDER BY se.date DESC LIMIT 200",
-      params: [batch],
-      answer: "Recordings available for the selected batch.",
-      tables: ["recordings", "sessions", "batches"],
-    };
-  }
-
-  if (intent.intent === "fill_rate") {
-    return {
-      sql: "SELECT b.name AS batch, b.course_name AS course, b.student_count, r.capacity, ROUND(100.0 * b.student_count / r.capacity, 1) AS fill_rate_percent, b.mode FROM batches b JOIN rooms r ON r.id = b.room_id WHERE LOWER(b.name) LIKE ? OR LOWER(b.course_name) LIKE ? ORDER BY fill_rate_percent DESC LIMIT 200",
-      params: [batch, batch],
-      answer: "Batch occupancy compared with assigned room capacity.",
-      tables: ["batches", "rooms"],
-    };
-  }
-
-  if (intent.intent === "unpaid_by_course" && role === "counselor") {
-    return {
-      sql: "SELECT course_name, SUM(amount_due) AS amount_due, SUM(instalment_count) AS instalments FROM fee_summary WHERE status != ? GROUP BY course_name ORDER BY amount_due DESC LIMIT 200",
-      params: ["paid"],
-      answer: "Unpaid instalment totals grouped by course, without student identities.",
-      tables: ["fee_summary"],
-    };
-  }
-
-  if (intent.intent === "unpaid_by_course") {
-    return {
-      sql: "SELECT c.name AS course, COUNT(DISTINCT s.id) AS unpaid_students, SUM(i.amount - i.paid_amount) AS amount_due FROM instalments i JOIN students s ON s.id = i.student_id JOIN courses c ON c.id = s.course_id WHERE i.status != ? AND i.amount > i.paid_amount GROUP BY c.name ORDER BY amount_due DESC LIMIT 200",
-      params: ["paid"],
-      answer: "Unpaid student counts and outstanding balances by course.",
-      tables: ["instalments", "students", "courses"],
-    };
-  }
-
-  return {
-    sql: "SELECT (SELECT COUNT(*) FROM students) AS students, (SELECT COUNT(*) FROM batches) AS batches, (SELECT COUNT(*) FROM courses) AS courses LIMIT 200",
-    params: [],
-    answer: "Current institute counts from the role-scoped database.",
-    tables: ["students", "batches", "courses"],
-  };
-}
-
-async function requestLlmSql(question, role) {
-  const endpoint = env.VITE_COPILOT_ENDPOINT;
-  if (env.VITE_COPILOT_MODE !== "llm" || !endpoint) return null;
-  const response = await fetch(endpoint, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ question, schema: getPolicy(role).tables }),
-  });
-  if (!response.ok) throw new Error(`Copilot endpoint returned ${response.status}.`);
-  const result = await response.json();
-  if (typeof result.sql !== "string") throw new Error("Copilot endpoint did not return SQL.");
-  return { sql: result.sql, params: Array.isArray(result.params) ? result.params : [], answer: result.answer || "Here is the result from your institute data." };
-}
-
-function formatMoney(value) {
-  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(Number(value) || 0);
-}
-
-function formatDate(value) {
-  if (!value) return "the upcoming due date";
-  return new Date(`${value}T00:00:00`).toLocaleDateString("en-IN", { day: "2-digit", month: "short", year: "numeric" });
-}
-
-function makeActionPreview(action, rows, question) {
-  if (action !== "whatsapp_reminder") return null;
-  const recipients = rows.filter((row) => row.phone).map((row) => ({
-    studentId: row.student_id,
-    name: row.name,
-    phone: row.phone,
-    message: `Hello ${row.name}, we noticed ${row.missed_classes} missed classes. Your EMI of ${formatMoney(row.amount_due)} is due on ${formatDate(row.due_date)}. Please reply if you need any help. Thank you, TechSummitTrainers.`,
-  }));
-  return {
-    kind: "whatsapp_reminder",
-    question,
-    recipients,
-    preview: `Draft ${recipients.length} WhatsApp reminder${recipients.length === 1 ? "" : "s"}. Nothing is sent until you approve and open each link.`,
-  };
-}
-
-export async function runCopilotMessage({ question, role = "owner", userId = "USR-OWNER", context = {} }) {
+function localSqlFor(question, role, context = {}) {
   const intent = planIntent(question, context);
-  const restrictedFinance = isFinanceQuestion(question) && !canAccessTable(role, "instalments");
-  const restrictedIdentity = role === "counselor" && isFinanceQuestion(question) && isIdentityFinanceQuestion(question);
-  if (restrictedFinance || restrictedIdentity) {
-    const message = restrictedFinance
-      ? "I can't access fee or EMI details for this role. Fee data is available to the owner and accounts roles."
-      : "I can show fee summaries, but student-level fee identity and contact details require the owner or accounts role.";
-    await addAuditEntry({ role, userId, event: "permission_refusal", detail: question });
-    return { intent: intent.intent, answer: message, refusal: true, rows: [], columns: [], sql: null, actionPreview: null, followups: ["Show my batch attendance", "What sessions are scheduled?"] };
-  }
+  const batch = intent.batch || extractBatch(question, context.batch);
+  const threshold = intent.threshold || extractThreshold(question, 3);
+  const batchFilter = batch ? " AND LOWER(b.name) = LOWER(?)" : "";
+  const batchParams = batch ? [batch] : [];
 
-  const required = intent.intent === "missed_emis"
-    ? ["students", "batches", "attendance", "instalments"]
-    : intent.intent === "emi_due" && role === "counselor"
-      ? ["fee_summary"]
-      : makeQuery(intent, role, question).tables;
-  const missing = missingTables(role, required);
-  if (missing.length) {
-    const message = `This role does not have access to ${missing.join(", ")}. Switch to an authorized role to run that query.`;
-    await addAuditEntry({ role, userId, event: "permission_refusal", detail: question });
-    return { intent: intent.intent, answer: message, refusal: true, rows: [], columns: [], sql: null, actionPreview: null, followups: [] };
-  }
-
-  let descriptor;
-  try {
-    descriptor = await requestLlmSql(question, role);
-  } catch (error) {
-    console.warn("Copilot LLM plan failed; using the local query planner.", error);
-  }
-  const localPlan = makeQuery(intent, role, question);
-  const plan = descriptor || localPlan;
-  if (descriptor && plan.tables && missingTables(role, plan.tables).length) {
-    await addAuditEntry({ role, userId, event: "permission_refusal", detail: question });
-    return { intent: intent.intent, answer: "The requested query needs data outside this role's permissions.", refusal: true, rows: [], columns: [], sql: null, actionPreview: null, followups: [] };
-  }
-
-  try {
-    const result = await runRoleQuery({ role, userId, sql: plan.sql, params: plan.params || [] });
-    let actionPreview = makeActionPreview(intent.action, result.rows, question);
-    if (actionPreview) {
-      const approval = await createApproval({ role, userId, kind: actionPreview.kind, payload: actionPreview.recipients, preview: actionPreview.preview });
-      actionPreview = { ...actionPreview, approvalId: approval.id };
-    }
-    const answer = result.rows.length ? plan.answer : "No matching records were found in the role-scoped data.";
+  if (intent.intent === "missed_classes") {
     return {
-      intent: intent.intent,
-      answer,
-      sql: result.sql,
-      columns: result.columns,
-      rows: result.rows,
-      actionPreview,
-      followups: followupsFor(intent),
-      context: { batch: extractBatch(question, context.batch), intent: intent.intent, threshold: intent.threshold },
+      intent,
+      sql: `SELECT s.id AS student_id, s.name, COUNT(a.id) AS missed_classes
+        FROM students s JOIN attendance a ON a.student_id = s.id
+        JOIN sessions se ON se.id = a.session_id JOIN batches b ON b.id = se.batch_id
+        WHERE LOWER(a.status) = ?${batchFilter}
+        GROUP BY s.id, s.name HAVING COUNT(a.id) >= ?
+        ORDER BY missed_classes DESC LIMIT 200`,
+      params: ["absent", ...batchParams, threshold],
     };
-  } catch (error) {
-    await addAuditEntry({ role, userId, event: "query_error", detail: `${question}: ${error.message}` });
-    return { intent: intent.intent, answer: `I couldn't safely run that query: ${error.message}`, sql: null, columns: [], rows: [], actionPreview: null, followups: [] };
   }
+  if (intent.intent === "missed_emis") {
+    if (!((role === "owner") || role === "accounts")) return { intent, unsupported: "Your role can access finance summaries, but cannot link fee details to individual student names through the available views." };
+    const window = dateWindow("week");
+    return {
+      intent,
+      sql: `WITH missed AS (
+          SELECT s.id AS student_id, s.name, COUNT(a.id) AS missed_classes
+          FROM students s JOIN attendance a ON a.student_id = s.id
+          JOIN sessions se ON se.id = a.session_id JOIN batches b ON b.id = se.batch_id
+          WHERE LOWER(a.status) = ?${batchFilter}
+          GROUP BY s.id, s.name HAVING COUNT(a.id) >= ?
+        ), due AS (
+          SELECT i.student_id, COUNT(i.id) AS emi_due_count, MIN(i.due_date) AS next_due_date,
+            SUM(i.amount - i.paid_amount) AS amount_due
+          FROM instalments i WHERE LOWER(i.status) = ? AND i.due_date BETWEEN ? AND ?
+          GROUP BY i.student_id
+        )
+        SELECT missed.student_id, missed.name, missed.missed_classes, due.emi_due_count,
+          due.next_due_date, due.amount_due
+        FROM missed JOIN due ON due.student_id = missed.student_id
+        ORDER BY missed.missed_classes DESC LIMIT 200`,
+      params: ["absent", ...batchParams, threshold, "pending", window.start, window.end],
+    };
+  }
+  if (intent.intent === "emi_due") {
+    if (role === "counselor") {
+      const window = dateWindow(intent.period || "week");
+      return {
+        intent,
+        sql: "SELECT course_name, status, due_date, instalment_count, amount_due FROM fee_summary WHERE due_date BETWEEN ? AND ? ORDER BY due_date LIMIT 200",
+        params: [window.start, window.end],
+      };
+    }
+    if (!["owner", "accounts"].includes(role)) return { intent, unsupported: "Fee and instalment details are unavailable for your role." };
+    const window = dateWindow(intent.period || "week");
+    return {
+      intent,
+      sql: `SELECT s.id AS student_id, s.name, i.due_date, i.amount - i.paid_amount AS amount_due, i.status
+        FROM students s JOIN instalments i ON i.student_id = s.id
+        WHERE i.due_date BETWEEN ? AND ? ORDER BY i.due_date LIMIT 200`,
+      params: [window.start, window.end],
+    };
+  }
+  if (intent.intent === "absent_today") {
+    const window = dateWindow("today");
+    return {
+      intent,
+      sql: `SELECT s.id AS student_id, s.name, b.name AS batch_name, se.date
+        FROM students s JOIN attendance a ON a.student_id = s.id
+        JOIN sessions se ON se.id = a.session_id JOIN batches b ON b.id = se.batch_id
+        WHERE LOWER(a.status) = ? AND se.date = ? ORDER BY b.name, s.name LIMIT 200`,
+      params: ["absent", window.start],
+    };
+  }
+  if (intent.intent === "overview" || intent.intent === "fill_rate") {
+    return {
+      intent,
+      sql: `SELECT b.id AS batch_id, b.name AS batch_name, COUNT(s.id) AS student_count
+        FROM batches b LEFT JOIN students s ON s.batch_id = b.id
+        GROUP BY b.id, b.name ORDER BY student_count DESC LIMIT 200`,
+      params: [],
+    };
+  }
+  return { intent, unsupported: "The local planner could not safely map that question to a supported query." };
 }
 
-function followupsFor(intent) {
-  if (intent.intent === "missed_emis") return ["Show only overdue EMIs", "Draft a counselor follow-up", "Compare another batch"];
-  if (intent.intent === "emi_due") return ["Show overdue EMIs", "Break this down by course", "Who has the highest balance?"];
-  if (intent.intent === "missed_classes") return ["Show dropout risk", "Compare another batch", "Draft a WhatsApp reminder"];
-  return ["Show today's absences", "Check batch fill rates", "Show fees due this week"];
+function answerForLocalResult(question, plan, rows) {
+  if (plan.unsupported) return plan.unsupported;
+  if (!rows.length) return "I found no matching rows for the selected filters.";
+  if (plan.intent.intent === "missed_classes") return `I found ${rows.length} student${rows.length === 1 ? "" : "s"} with at least ${plan.intent.threshold} recorded absences${plan.intent.batch ? ` in the ${plan.intent.batch} batch` : ""}.`;
+  if (plan.intent.intent === "missed_emis") return `I found ${rows.length} student${rows.length === 1 ? "" : "s"} matching the missed-class and EMI-due filters for this week${plan.intent.batch ? ` in the ${plan.intent.batch} batch` : ""}.`;
+  if (plan.intent.intent === "emi_due") return `I found ${rows.length} due-fee record${rows.length === 1 ? "" : "s"} in the selected date range.`;
+  if (plan.intent.intent === "absent_today") return `I found ${rows.length} absent attendance record${rows.length === 1 ? "" : "s"} for today.`;
+  return `I found ${rows.length} batch${rows.length === 1 ? "" : "es"} in the local data.`;
+}
+
+async function hashText(value) {
+  if (!globalThis.crypto?.subtle) return "";
+  const bytes = new TextEncoder().encode(value);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+async function runLocalFallback({ question, role, userId, context, unavailableReason }) {
+  let verifiedRole = role;
+  let verifiedUserId = userId;
+  if (supabaseEnabled && !localDemoMode) {
+    const membership = await getAuthenticatedInstituteContext();
+    if (!membership?.role || !membership?.user_id) throw new Error("A verified institute membership is required for the local fallback.");
+    verifiedRole = membership.role;
+    verifiedUserId = membership.user_id;
+  }
+  if (verifiedRole === "trainer" && isFinanceQuestion(question)) {
+    return { mode: "local", refusal: true, answer: "I can’t show fee, EMI, payment, or outstanding-balance information for a Trainer account. You can ask about attendance, batches, assignments, or recordings instead.", unavailableReason };
+  }
+  const plan = localSqlFor(question, verifiedRole, context);
+  if (plan.unsupported) return { mode: "local", answer: plan.unsupported, refusal: true, unavailableReason, context: plan.intent };
+  const result = await runRoleQuery({ role: verifiedRole, userId: verifiedUserId, sql: plan.sql, params: plan.params });
+  if (supabaseEnabled && !localDemoMode) {
+    await auditCopilotEvent("copilot.local_query", { sql: result.sql, rowCount: result.rows.length });
+  }
+  let actionPreview = null;
+  if (detectAction(question) === "whatsapp_reminder" && plan.intent.intent === "missed_emis" && verifiedRole === "owner" && result.rows.length) {
+    const ids = result.rows.map((row) => row.student_id).filter(Boolean);
+    const contactResult = await runRoleQuery({
+      role: verifiedRole,
+      userId: verifiedUserId,
+      sql: `SELECT id, name, phone FROM students WHERE id IN (${ids.map(() => "?").join(",")}) LIMIT 200`,
+      params: ids,
+    });
+    const contacts = new Map(contactResult.rows.map((row) => [row.id, row]));
+    const recipients = result.rows.map((row) => {
+      const contact = contacts.get(row.student_id);
+      const firstName = String(contact?.name || row.name || "there").split(/\s+/)[0];
+      return {
+        studentId: row.student_id,
+        name: contact?.name || row.name,
+        phone: contact?.phone || "",
+        message: `Hi ${firstName}, our records show you missed ${row.missed_classes} classes and have an instalment due this week. Please contact ${verifiedRole === "owner" ? "the institute team" : "us"} if you need help. Thank you.`,
+      };
+    });
+    const approval = await createApproval({
+      role: verifiedRole,
+      userId: verifiedUserId,
+      kind: "whatsapp_reminders",
+      payload: { recipients },
+      preview: `Draft ${recipients.length} WhatsApp reminder${recipients.length === 1 ? "" : "s"}. Nothing will be sent until an authorized human approves it.`,
+    });
+    actionPreview = { approvalId: approval.id, kind: "whatsapp_reminders", preview: approval.preview, recipients };
+  }
+  const answer = answerForLocalResult(question, plan, result.rows);
+  if (supabaseEnabled && !localDemoMode) await auditCopilotEvent("copilot.local_answer", { promptHash: await hashText(question), mode: "local" });
+  return {
+    mode: "local",
+    dataMode: supabaseEnabled && !localDemoMode ? "live" : "local",
+    unavailableReason,
+    answer,
+    refusal: false,
+    sql: result.sql,
+    columns: result.columns,
+    rows: result.rows,
+    actionPreview,
+    followups: plan.intent.batch ? [`And in the ${plan.intent.batch} batch?`, "Show today's attendance"] : ["Show today's attendance", "Show overdue EMIs"],
+    context: { batch: plan.intent.batch || context?.batch, threshold: plan.intent.threshold || context?.threshold },
+  };
+}
+
+export async function runCopilotMessage({ question, role, userId, context, signal, onStage, onText }) {
+  const response = await streamCopilotBackend(question, { signal, onStage, onText });
+  if (response.fallbackAvailable) {
+    const local = await runLocalFallback({ question, role, userId, context, unavailableReason: response.unavailableReason });
+    return { ...local, answerId: globalThis.crypto?.randomUUID?.() || `answer-${Date.now()}` };
+  }
+  return {
+    ...response,
+    answerId: response.answerId || globalThis.crypto?.randomUUID?.() || `answer-${Date.now()}`,
+  };
 }

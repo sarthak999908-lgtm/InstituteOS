@@ -4,10 +4,11 @@ import {
   Pencil, Plus, Search, Trash2, Users, Wallet, X, Printer,
 } from "lucide-react";
 import { INITIAL_STUDENTS } from "./data.js";
-import { batches as instituteBatches, courses, feePlans, instalments, rooms, students as instituteStudents, trainers, users } from "./data/mockData.js";
+import { batches as instituteBatches, courses, feePlans, instalments, rooms, students as instituteStudents, trainerIdByUserId, trainers } from "./data/mockData.js";
 import ReconciliationPanel from "./features/fees/ReconciliationPanel.jsx";
 import FeeReceiptModal from "./features/fees/FeeReceiptModal.jsx";
 import { recordFeePayment, createBatch } from "./services/api.js";
+import { appStorageKey } from "./lib/localDemo.js";
 
 
 const seedBatches = instituteBatches.map((batch) => ({
@@ -47,9 +48,10 @@ function makePaymentEntry(record, amount) {
 }
 
 function useLocalRecords(key, initialValue) {
+  const scopedKey = appStorageKey(key);
   const [records, setRecords] = useState(() => {
     try {
-      const saved = localStorage.getItem(key);
+      const saved = localStorage.getItem(scopedKey);
       if (saved !== null) {
         const parsed = JSON.parse(saved);
         if (Array.isArray(parsed)) return parsed;
@@ -58,9 +60,9 @@ function useLocalRecords(key, initialValue) {
     return initialValue;
   });
   useEffect(() => {
-    try { localStorage.setItem(key, JSON.stringify(records)); }
+    try { localStorage.setItem(scopedKey, JSON.stringify(records)); }
     catch (error) { console.error(`Could not save ${key}:`, error); }
-  }, [key, records]);
+  }, [scopedKey, key, records]);
   return [records, setRecords];
 }
 
@@ -135,7 +137,7 @@ export function BatchesPage() {
 
 function loadStudentList() {
   try {
-    const saved = localStorage.getItem("instituteos_students");
+    const saved = localStorage.getItem(appStorageKey("instituteos_students"));
     if (saved === null) return INITIAL_STUDENTS;
     const data = JSON.parse(saved);
     if (Array.isArray(data)) return data;
@@ -148,9 +150,8 @@ export function AttendancePage({ role = "owner", userId = "USR-OWNER" }) {
   const [allStudents] = useState(loadStudentList);
   const [batches] = useLocalRecords("instituteos_batches", seedBatches);
   const [records, setRecords] = useLocalRecords("instituteos_attendance", []);
-  const trainerUser = users.find((user) => user.id === userId);
-  const trainer = trainers.find((item) => item.name === trainerUser?.name);
-  const allowedBatchIds = new Set(instituteBatches.filter((batch) => batch.trainer_id === trainer?.id).map((batch) => batch.id));
+  const trainerId = trainerIdByUserId[userId];
+  const allowedBatchIds = new Set(instituteBatches.filter((batch) => batch.trainer_id === trainerId).map((batch) => batch.id));
   const visibleBatches = role === "trainer" ? batches.filter((batch) => allowedBatchIds.has(batch.id)) : batches;
   const students = role === "trainer"
     ? allStudents.filter((student) => allowedBatchIds.has(instituteBatches.find((batch) => batch.name === student.batch)?.id))
@@ -237,12 +238,16 @@ export function FeesPage({ role = "owner", userId = "USR-OWNER" }) {
     payment.update((current) => current.map((item) => item.id === payment.record.id ? { ...item, paid: Number(item.paid) + amount } : item));
     recordFeePayment({
       studentId: payment.record.studentId,
-      amount,
+      instalmentId: payment.record.id,
+      // Preserve the entered decimal string for the numeric database RPC;
+      // local optimistic totals still use the parsed amount above.
+      amount: paymentAmount.trim(),
       method: "bank_transfer",
     }).catch((err) => console.debug("API recordFeePayment fallback:", err.message));
     try {
-      const payments = JSON.parse(localStorage.getItem("instituteos_payments") || "[]");
-      localStorage.setItem("instituteos_payments", JSON.stringify([...(Array.isArray(payments) ? payments : []), makePaymentEntry(payment.record, amount)]));
+      const paymentsKey = appStorageKey("instituteos_payments");
+      const payments = JSON.parse(localStorage.getItem(paymentsKey) || "[]");
+      localStorage.setItem(paymentsKey, JSON.stringify([...(Array.isArray(payments) ? payments : []), makePaymentEntry(payment.record, amount)]));
     } catch (error) {
       console.error("Could not save local payment history:", error);
     }

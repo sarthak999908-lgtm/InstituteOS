@@ -34,7 +34,7 @@ export function detectAction(question) {
 }
 
 export function isFinanceQuestion(question) {
-  return /\b(?:emi|emis|fee|fees|payment|payments|paid|unpaid|outstanding|instalment|installment|collection|collections)\b|(?:not\s+paid|hasn.t\s+paid|pending\s+(?:amount|balance)|due\s+amount)/i.test(question);
+  return /\b(?:emi|emis|fee|fees|payment|payments|paid|unpaid|outstanding|instal+ments?|collection|collections|balance|financial|finance|arrears|owe|owes|owing|debt|debts|money|owed)\b|(?:not\s+paid|hasn.t\s+paid|pending\s+(?:amounts?|balance|dues?)|due\s+amounts?)/i.test(question);
 }
 
 export function isIdentityFinanceQuestion(question) {

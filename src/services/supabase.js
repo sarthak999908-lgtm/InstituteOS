@@ -1,17 +1,37 @@
 import { createClient } from "@supabase/supabase-js";
+import { createSupabaseAuth } from "./supabaseAuth.js";
+import { inspectSupabaseConfig, supabaseEnvironmentConfig } from "./supabaseConfig.js";
+import { localDemoMode } from "../lib/localDemo.js";
 
-const env = typeof import.meta !== "undefined" && import.meta.env ? import.meta.env : {};
-const url = env.VITE_SUPABASE_URL || (typeof process !== "undefined" ? process.env?.VITE_SUPABASE_URL : undefined);
-const anonKey = env.VITE_SUPABASE_ANON_KEY || (typeof process !== "undefined" ? process.env?.VITE_SUPABASE_ANON_KEY : undefined);
+export let supabaseConfigStatus = inspectSupabaseConfig(supabaseEnvironmentConfig);
+export let supabaseEnabled = supabaseConfigStatus.configured && !localDemoMode;
 
-export const supabaseEnabled = Boolean(url && anonKey && url.startsWith("http"));
-
-export const supabaseClient = supabaseEnabled
-  ? createClient(url, anonKey, {
+let client = null;
+if (supabaseEnabled) {
+  try {
+    client = createClient(supabaseEnvironmentConfig.url, supabaseEnvironmentConfig.anonKey, {
       auth: { persistSession: true, autoRefreshToken: true },
       realtime: { params: { eventsPerSecond: 10 } },
-    })
-  : null;
+    });
+  } catch {
+    // Keep diagnostics limited to variable names; never expose environment values.
+    supabaseConfigStatus = Object.freeze({
+      configured: false,
+      missingVariables: Object.freeze([]),
+      invalidVariables: Object.freeze(["VITE_SUPABASE_URL", "VITE_SUPABASE_ANON_KEY"]),
+      issues: Object.freeze(["VITE_SUPABASE_URL", "VITE_SUPABASE_ANON_KEY"]),
+    });
+    supabaseEnabled = false;
+  }
+}
+
+export const supabaseClient = client;
+const supabaseAuth = createSupabaseAuth(supabaseClient);
+
+/** Resolve the active staff role from the database membership, never user-editable metadata. */
+export async function getAuthenticatedInstituteContext() {
+  return supabaseAuth.getAuthenticatedInstituteContext();
+}
 
 /**
  * Fetch initial data from Supabase for role-scoped database cache
@@ -20,24 +40,35 @@ export async function fetchSupabaseSeed(schema, role) {
   if (!supabaseClient) return null;
   const entries = Object.entries(schema);
   const views = {
-    trainer: { students: "trainer_students" },
-    counselor: { fee_summary: "counselor_fee_summary" },
-    accounts: { students: "account_students" },
+    owner: { students: "student_profiles", courses: "course_catalog" },
+    counselor: { students: "student_profiles", courses: "course_catalog", fee_summary: "counselor_fee_summary" },
+    trainer: { students: "trainer_students", courses: "course_catalog" },
+    accounts: { students: "account_students", courses: "course_catalog" },
   };
 
   const responses = await Promise.all(
     entries.map(async ([table, columns]) => {
+      if (table === "fee_summary" && role !== "counselor") return [table, []];
+      if (table === "courses" && ["owner", "accounts"].includes(role)) {
+        try {
+          const [catalog, finance] = await Promise.all([
+            supabaseClient.from("course_catalog").select("id,name,duration_weeks,created_at"),
+            supabaseClient.from("course_finance").select("id,fee_total"),
+          ]);
+          if (catalog.error || finance.error) throw new Error("Scoped course access was denied.");
+          const financeById = new Map((finance.data || []).map((row) => [row.id, row.fee_total]));
+          return [table, (catalog.data || []).map((row) => ({ ...row, fee_total: financeById.get(row.id) ?? 0 }))];
+        } catch {
+          throw new Error("Supabase could not load the scoped course views.");
+        }
+      }
       const relation = views[role]?.[table] || table;
       try {
         const { data, error } = await supabaseClient.from(relation).select(columns.join(","));
-        if (error) {
-          console.warn(`Supabase read notice for ${relation}:`, error.message);
-          return [table, []];
-        }
+        if (error) throw new Error(`Supabase could not load ${relation}.`);
         return [table, data || []];
-      } catch (err) {
-        console.warn(`Supabase network issue on ${relation}:`, err);
-        return [table, []];
+      } catch {
+        throw new Error(`Supabase could not load ${relation}.`);
       }
     })
   );
@@ -48,39 +79,13 @@ export async function fetchSupabaseSeed(schema, role) {
  * Fetch live dashboard telemetry via Supabase RPC or table aggregations
  */
 export async function getSupabaseDashboardTelemetry() {
-  if (!supabaseClient) return null;
-
-  try {
-    const { data, error } = await supabaseClient.rpc("get_dashboard_telemetry");
-    if (!error && data) return data;
-  } catch (err) {
-    console.warn("RPC get_dashboard_telemetry unavailable, calculating manually:", err);
-  }
-
-  try {
-    const [studentsRes, batchesRes, instalmentsRes] = await Promise.all([
-      supabaseClient.from("students").select("id", { count: "exact" }).eq("status", "Active"),
-      supabaseClient.from("batches").select("id", { count: "exact" }),
-      supabaseClient.from("instalments").select("amount, paid_amount, status"),
-    ]);
-
-    const instalments = instalmentsRes.data || [];
-    const pendingFees = instalments
-      .filter((i) => i.status !== "paid")
-      .reduce((sum, i) => sum + Math.max(0, Number(i.amount || 0) - Number(i.paid_amount || 0)), 0);
-    const overdueCount = instalments.filter((i) => i.status === "overdue").length;
-
-    return {
-      totalStudents: studentsRes.count || 1248,
-      activeBatches: batchesRes.count || 24,
-      attendancePercentage: 87.5,
-      pendingFees: pendingFees || 125000,
-      overdueInstalments: overdueCount || 18,
-    };
-  } catch (err) {
-    console.warn("Could not query Supabase dashboard telemetry:", err);
-    return null;
-  }
+  if (!supabaseClient) throw new Error("Supabase is not configured.");
+  const [students, batches] = await Promise.all([
+    supabaseClient.from("students").select("id", { count: "exact", head: true }),
+    supabaseClient.from("batches").select("id", { count: "exact", head: true }),
+  ]);
+  if (students.error || batches.error) throw new Error("Supabase dashboard metrics are unavailable.");
+  return { totalStudents: students.count || 0, activeBatches: batches.count || 0 };
 }
 
 /**
@@ -100,7 +105,8 @@ export async function upsertSupabaseStudent(student) {
     updated_at: new Date().toISOString(),
   };
 
-  const { data, error } = await supabaseClient.from("students").upsert(payload).select().single();
+  const { data, error } = await supabaseClient.from("students").upsert(payload)
+    .select("id,name,batch_id,status,joined_on,course_id,batch_name").single();
   if (error) throw new Error(`Supabase student upsert failed: ${error.message}`);
   return data;
 }
@@ -122,15 +128,6 @@ export async function insertSupabaseRow(table, row) {
   if (!supabaseClient) return;
   const { error } = await supabaseClient.from(table).insert(row);
   if (error) throw new Error(`Supabase insert failed for ${table}: ${error.message}`);
-}
-
-/**
- * Update an approval workflow status
- */
-export async function updateSupabaseApproval(approvalId, values) {
-  if (!supabaseClient) return;
-  const { error } = await supabaseClient.from("approvals").update(values).eq("id", approvalId);
-  if (error) throw new Error(`Supabase approval update failed: ${error.message}`);
 }
 
 /**
@@ -157,196 +154,42 @@ export function subscribeToSupabaseTable(table, callback) {
 
 // ─── Auth Helpers ────────────────────────────────────────────────────────────
 
-const API_BASE = (typeof import.meta !== "undefined" && import.meta.env?.VITE_API_URL) || "http://localhost:5000/api";
+export const signInWithEmail = (...args) => supabaseAuth.signInWithEmail(...args);
+export const sendMagicLink = (...args) => supabaseAuth.sendMagicLink(...args);
+export const verifyEmailOtp = (...args) => supabaseAuth.verifyEmailOtp(...args);
+export const signUpWithEmail = (...args) => supabaseAuth.signUpWithEmail(...args);
 
-/**
- * Sign in with email + password via Supabase Auth or Backend REST API.
- * Returns { user, session, error }.
- */
-export async function signInWithEmail(email, password) {
-  if (supabaseClient) {
+/** Clear app-owned identity and audit caches without printing credential values. */
+let localAuthCleanup;
+export function clearLocalAuthState() {
+  if (localAuthCleanup) return localAuthCleanup;
+  localAuthCleanup = (async () => {
+    try { localStorage.removeItem("instituteos_session"); } catch {}
+    try { localStorage.removeItem("instituteos_demo_session"); } catch {}
     try {
-      const { data, error } = await supabaseClient.auth.signInWithPassword({ email, password });
-      if (!error && data?.user) return { user: data.user, session: data.session, error: null };
-    } catch (e) {
-      console.warn("Supabase auth notice:", e.message);
+      const database = await import("../lib/database.js");
+      await database.clearLocalAuditLog();
+    } catch {
+      // Privacy takes precedence if the local SQL.js cache cannot be opened.
+      try { localStorage.removeItem("instituteos_sqlite_v1"); } catch {}
     }
-  }
-
-  try {
-    const res = await fetch(`${API_BASE}/auth/signin`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || "Authentication failed");
-
-    localStorage.setItem("instituteos_session", JSON.stringify(data.session));
-    return { user: data.user, session: data.session, error: null };
-  } catch {
-    const role = (email || "").toLowerCase().includes("owner") || (email || "").toLowerCase().includes("admin")
-      ? "owner"
-      : (email || "").toLowerCase().includes("trainer")
-      ? "trainer"
-      : (email || "").toLowerCase().includes("account")
-      ? "accounts"
-      : "counselor";
-    const user = {
-      id: `USR-${Date.now().toString().slice(-6)}`,
-      email,
-      role,
-      app_metadata: { role },
-      user_metadata: { name: email.split("@")[0], role },
-    };
-    const session = { access_token: `inst_token_${btoa(JSON.stringify(user))}`, user };
-    localStorage.setItem("instituteos_session", JSON.stringify(session));
-    return { user, session, error: null };
-  }
+  })().finally(() => { localAuthCleanup = null; });
+  return localAuthCleanup;
 }
 
-/**
- * Send a Magic Link (email OTP) to the given email address.
- * Returns { error, otp } — null error on success.
- */
-export async function sendMagicLink(email) {
-  if (supabaseClient) {
-    try {
-      const { error } = await supabaseClient.auth.signInWithOtp({
-        email,
-        options: { emailRedirectTo: window.location.origin },
-      });
-      if (!error) return { error: null };
-    } catch (e) {
-      console.warn("Supabase OTP notice:", e.message);
-    }
-  }
-
-  try {
-    const res = await fetch(`${API_BASE}/auth/magic-link`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || "Could not send magic link");
-    return { error: null, otp: data.otp };
-  } catch {
-    return { error: null, otp: "123456" };
-  }
-}
-
-/**
- * Verify a 6-digit OTP code sent to the user's email.
- * Returns { user, session, error }.
- */
-export async function verifyEmailOtp(email, token) {
-  if (supabaseClient) {
-    try {
-      const { data, error } = await supabaseClient.auth.verifyOtp({
-        email,
-        token,
-        type: "email",
-      });
-      if (!error && data?.user) return { user: data.user, session: data.session, error: null };
-    } catch (e) {
-      console.warn("Supabase verifyOtp notice:", e.message);
-    }
-  }
-
-  try {
-    const res = await fetch(`${API_BASE}/auth/verify-otp`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, token }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || "Invalid OTP code");
-
-    localStorage.setItem("instituteos_session", JSON.stringify(data.session));
-    return { user: data.user, session: data.session, error: null };
-  } catch (err) {
-    if (token === "123456" || (token && token.length === 6)) {
-      const role = (email || "").toLowerCase().includes("owner") || (email || "").toLowerCase().includes("admin")
-        ? "owner"
-        : (email || "").toLowerCase().includes("trainer")
-        ? "trainer"
-        : (email || "").toLowerCase().includes("account")
-        ? "accounts"
-        : "counselor";
-      const user = {
-        id: `USR-${Date.now().toString().slice(-6)}`,
-        email,
-        role,
-        app_metadata: { role },
-        user_metadata: { name: email.split("@")[0], role },
-      };
-      const session = { access_token: `inst_token_${btoa(JSON.stringify(user))}`, user };
-      localStorage.setItem("instituteos_session", JSON.stringify(session));
-      return { user, session, error: null };
-    }
-    return { user: null, session: null, error: err };
-  }
-}
-
-/**
- * Resend an OTP / magic link to the same email.
- */
-export async function resendOtp(email) {
-  return sendMagicLink(email);
-}
-
-/**
- * Register a new user with email + password.
- */
-export async function signUpWithEmail(email, password, role = "counselor", name = "") {
-  if (supabaseClient) {
-    try {
-      const { data, error } = await supabaseClient.auth.signUp({
-        email,
-        password,
-        options: { data: { role, name: name || email.split("@")[0] } },
-      });
-      if (!error && data?.user) return { user: data.user, session: data.session, error: null };
-    } catch (e) {
-      console.warn("Supabase signUp notice:", e.message);
-    }
-  }
-
-  try {
-    const res = await fetch(`${API_BASE}/auth/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ email, password, role, name }),
-    });
-    const data = await res.json();
-    if (!res.ok || !data.success) throw new Error(data.error || "Registration failed");
-
-    localStorage.setItem("instituteos_session", JSON.stringify(data.session));
-    return { user: data.user, session: data.session, error: null };
-  } catch {
-    const effectiveRole = (email || "").toLowerCase().includes("owner") || (email || "").toLowerCase().includes("admin") ? "owner" : role;
-    const user = {
-      id: `USR-${Date.now().toString().slice(-6)}`,
-      email,
-      role: effectiveRole,
-      name: name || email.split("@")[0],
-      app_metadata: { role: effectiveRole },
-      user_metadata: { name: name || email.split("@")[0], role: effectiveRole },
-    };
-    const session = { access_token: `inst_token_${btoa(JSON.stringify(user))}`, user };
-    localStorage.setItem("instituteos_session", JSON.stringify(session));
-    return { user, session, error: null };
-  }
-}
-
-/** Sign out the current user. */
+/** Sign out and clear all app-owned cached identity/audit state. */
 export async function signOut() {
-  try { localStorage.removeItem("instituteos_session"); } catch {}
-  try { localStorage.removeItem("instituteos_demo_session"); } catch {}
+  let error = null;
   if (supabaseClient) {
-    try { await supabaseClient.auth.signOut(); } catch {}
+    try {
+      const result = await supabaseClient.auth.signOut();
+      error = result?.error || null;
+    } catch (caught) {
+      error = caught;
+    }
   }
+  await clearLocalAuthState();
+  return { error };
 }
 
 /** Return the currently authenticated user, or null. */
@@ -357,17 +200,10 @@ export async function getCurrentUser() {
 
 /** Return the current active session (contains JWT), or null. */
 export async function getSession() {
-  if (supabaseClient) {
-    try {
-      const { data } = await supabaseClient.auth.getSession();
-      if (data?.session) return data.session;
-    } catch {}
-  }
-  try {
-    const saved = localStorage.getItem("instituteos_session");
-    if (saved) return JSON.parse(saved);
-  } catch {}
-  return null;
+  if (!supabaseClient) return null;
+  const { data, error } = await supabaseClient.auth.getSession();
+  if (error) throw error;
+  return data?.session || null;
 }
 
 /**

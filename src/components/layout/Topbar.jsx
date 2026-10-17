@@ -194,6 +194,11 @@ export default function Topbar({
               <RefreshCw size={13} className="spinning" color="var(--accent-primary)" />
               <span>Syncing…</span>
             </>
+          ) : dashboard?.source === "fictional-local-demo" ? (
+            <>
+              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--warning)" }} />
+              <span style={{ color: "var(--warning)", fontWeight: 600 }}>Local demo</span>
+            </>
           ) : (
             <>
               <span

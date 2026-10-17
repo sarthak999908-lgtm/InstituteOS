@@ -1,3 +1,5 @@
+import { appStorageKey } from "./localDemo.js";
+
 /**
  * Cosmic Aurora Procedural Sound FX (Web Audio API)
  * Off by default; toggleable in settings or topbar. Zero audio assets required.
@@ -8,7 +10,7 @@ class SoundSystem {
     this.ctx = null;
     this.enabled = false;
     try {
-      this.enabled = localStorage.getItem("instituteos_sound_enabled") === "true";
+      this.enabled = localStorage.getItem(appStorageKey("instituteos_sound_enabled")) === "true";
     } catch {
       this.enabled = false;
     }
@@ -29,7 +31,7 @@ class SoundSystem {
   setEnabled(val) {
     this.enabled = Boolean(val);
     try {
-      localStorage.setItem("instituteos_sound_enabled", String(this.enabled));
+      localStorage.setItem(appStorageKey("instituteos_sound_enabled"), String(this.enabled));
     } catch {}
   }
 

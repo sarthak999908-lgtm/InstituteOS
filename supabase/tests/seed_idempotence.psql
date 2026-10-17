@@ -1,0 +1,97 @@
+\set ON_ERROR_STOP on
+-- Run only against a disposable local database as a database owner.
+\ir ../seed.sql
+
+create temporary table seed_snapshot_before as
+  select 'institutes'::text as relation_name, i.id::text as row_id, pg_catalog.to_jsonb(i) as row_data
+    from public.institutes i where i.id = 'INST-MAIN'
+  union all select 'users', u.id::text, pg_catalog.to_jsonb(u)
+    from public.users u where u.id like 'DEMO-USER-%'
+  union all select 'institute_members', m.institute_id || ':' || m.user_id, pg_catalog.to_jsonb(m)
+    from public.institute_members m where m.institute_id = 'INST-MAIN' and m.user_id like 'DEMO-USER-%'
+  union all select 'courses', c.id::text, pg_catalog.to_jsonb(c)
+    from public.courses c where c.id like 'DEMO-COURSE-%'
+  union all select 'trainers', t.id::text, pg_catalog.to_jsonb(t)
+    from public.trainers t where t.id like 'DEMO-TRAINER-%'
+  union all select 'trainer_availability', a.id::text, pg_catalog.to_jsonb(a)
+    from public.trainer_availability a where a.id in ('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002')
+  union all select 'rooms', r.id::text, pg_catalog.to_jsonb(r)
+    from public.rooms r where r.id like 'DEMO-ROOM-%'
+  union all select 'batches', b.id::text, pg_catalog.to_jsonb(b)
+    from public.batches b where b.id like 'DEMO-BATCH-%'
+  union all select 'students', s.id::text, pg_catalog.to_jsonb(s)
+    from public.students s where s.id like 'DEMO-STUDENT-%'
+  union all select 'sessions', s.id::text, pg_catalog.to_jsonb(s)
+    from public.sessions s where s.id like 'DEMO-SESSION-%'
+  union all select 'attendance', a.id::text, pg_catalog.to_jsonb(a)
+    from public.attendance a where a.id like 'DEMO-ATTENDANCE-%'
+  union all select 'assignments', a.id::text, pg_catalog.to_jsonb(a)
+    from public.assignments a where a.id like 'DEMO-ASSIGNMENT-%'
+  union all select 'submissions', s.id::text, pg_catalog.to_jsonb(s)
+    from public.submissions s where s.id like 'DEMO-SUBMISSION-%'
+  union all select 'recordings', r.id::text, pg_catalog.to_jsonb(r)
+    from public.recordings r where r.id like 'DEMO-RECORDING-%'
+  union all select 'fee_plans', f.id::text, pg_catalog.to_jsonb(f)
+    from public.fee_plans f where f.id like 'DEMO-FEE-PLAN-%'
+  union all select 'instalments', i.id::text, pg_catalog.to_jsonb(i)
+    from public.instalments i where i.id like 'DEMO-INSTALMENT-%'
+  union all select 'payments', p.id::text, pg_catalog.to_jsonb(p)
+    from public.payments p where p.id like 'DEMO-PAYMENT-%'
+  union all select 'approvals', a.id::text, pg_catalog.to_jsonb(a)
+    from public.approvals a where a.id like 'DEMO-APPROVAL-%';
+
+\ir ../seed.sql
+
+create temporary table seed_snapshot_after as
+  select 'institutes'::text as relation_name, i.id::text as row_id, pg_catalog.to_jsonb(i) as row_data
+    from public.institutes i where i.id = 'INST-MAIN'
+  union all select 'users', u.id::text, pg_catalog.to_jsonb(u)
+    from public.users u where u.id like 'DEMO-USER-%'
+  union all select 'institute_members', m.institute_id || ':' || m.user_id, pg_catalog.to_jsonb(m)
+    from public.institute_members m where m.institute_id = 'INST-MAIN' and m.user_id like 'DEMO-USER-%'
+  union all select 'courses', c.id::text, pg_catalog.to_jsonb(c)
+    from public.courses c where c.id like 'DEMO-COURSE-%'
+  union all select 'trainers', t.id::text, pg_catalog.to_jsonb(t)
+    from public.trainers t where t.id like 'DEMO-TRAINER-%'
+  union all select 'trainer_availability', a.id::text, pg_catalog.to_jsonb(a)
+    from public.trainer_availability a where a.id in ('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-000000000002')
+  union all select 'rooms', r.id::text, pg_catalog.to_jsonb(r)
+    from public.rooms r where r.id like 'DEMO-ROOM-%'
+  union all select 'batches', b.id::text, pg_catalog.to_jsonb(b)
+    from public.batches b where b.id like 'DEMO-BATCH-%'
+  union all select 'students', s.id::text, pg_catalog.to_jsonb(s)
+    from public.students s where s.id like 'DEMO-STUDENT-%'
+  union all select 'sessions', s.id::text, pg_catalog.to_jsonb(s)
+    from public.sessions s where s.id like 'DEMO-SESSION-%'
+  union all select 'attendance', a.id::text, pg_catalog.to_jsonb(a)
+    from public.attendance a where a.id like 'DEMO-ATTENDANCE-%'
+  union all select 'assignments', a.id::text, pg_catalog.to_jsonb(a)
+    from public.assignments a where a.id like 'DEMO-ASSIGNMENT-%'
+  union all select 'submissions', s.id::text, pg_catalog.to_jsonb(s)
+    from public.submissions s where s.id like 'DEMO-SUBMISSION-%'
+  union all select 'recordings', r.id::text, pg_catalog.to_jsonb(r)
+    from public.recordings r where r.id like 'DEMO-RECORDING-%'
+  union all select 'fee_plans', f.id::text, pg_catalog.to_jsonb(f)
+    from public.fee_plans f where f.id like 'DEMO-FEE-PLAN-%'
+  union all select 'instalments', i.id::text, pg_catalog.to_jsonb(i)
+    from public.instalments i where i.id like 'DEMO-INSTALMENT-%'
+  union all select 'payments', p.id::text, pg_catalog.to_jsonb(p)
+    from public.payments p where p.id like 'DEMO-PAYMENT-%'
+  union all select 'approvals', a.id::text, pg_catalog.to_jsonb(a)
+    from public.approvals a where a.id like 'DEMO-APPROVAL-%';
+
+do $assert_seed_idempotent$
+begin
+  if exists (
+    (select relation_name, row_id, row_data from seed_snapshot_before
+     except select relation_name, row_id, row_data from seed_snapshot_after)
+    union all
+    (select relation_name, row_id, row_data from seed_snapshot_after
+     except select relation_name, row_id, row_data from seed_snapshot_before)
+  ) then
+    raise exception 'Seed changed or duplicated a fixture row on its second run';
+  end if;
+end;
+$assert_seed_idempotent$;
+
+select 'PASS: second seed run left all captured demo fixture rows unchanged' as result;

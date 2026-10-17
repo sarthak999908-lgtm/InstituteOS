@@ -13,6 +13,10 @@ export const users = [
   { id: "USR-ACCOUNTS", name: "Meera Iyer", role: "accounts", email: "accounts@techsummittrainers.in" },
 ];
 
+// Explicit immutable identity links for the local demo fixtures. Remote trainer
+// authorization uses public.trainers.auth_user_id in the tenant migration.
+export const trainerIdByUserId = Object.freeze({ "USR-TRAINER": "TR-ANIL" });
+
 export const courses = [
   { id: "COURSE-JAVA", name: "Java Full Stack", fee_total: 48000, duration_weeks: 24 },
   { id: "COURSE-PYTHON", name: "Python and Data Science", fee_total: 52000, duration_weeks: 26 },

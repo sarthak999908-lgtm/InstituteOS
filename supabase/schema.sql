@@ -6,13 +6,34 @@
 create extension if not exists "uuid-ossp";
 create extension if not exists "pgcrypto";
 
--- 2. Core Users Table
+-- 2. Organizations & Institutes Table
+create table if not exists public.institutes (
+  id text primary key default 'INST-MAIN',
+  name text not null default 'TechSummit Trainers Institute',
+  code text unique not null default 'TST-01',
+  currency text default 'INR',
+  timezone text default 'Asia/Kolkata',
+  created_at timestamptz default now()
+);
+
+-- 3. Core Users Table
 create table if not exists public.users (
   id text primary key,
+  institute_id text references public.institutes(id) default 'INST-MAIN',
   name text not null,
   role text not null check (role in ('owner', 'counselor', 'trainer', 'accounts')),
   email text unique not null,
   created_at timestamptz default now()
+);
+
+-- 4. Organization Memberships
+create table if not exists public.institute_members (
+  id uuid primary key default gen_random_uuid(),
+  institute_id text not null references public.institutes(id) on delete cascade,
+  user_id text not null references public.users(id) on delete cascade,
+  role text not null check (role in ('owner', 'counselor', 'trainer', 'accounts')),
+  created_at timestamptz default now(),
+  unique (institute_id, user_id)
 );
 
 -- 3. Courses Catalog
@@ -105,7 +126,8 @@ create table if not exists public.attendance (
   join_at timestamptz,
   leave_at timestamptz,
   status text not null default 'Present' check (status in ('Present', 'Absent', 'Late')),
-  created_at timestamptz default now()
+  created_at timestamptz default now(),
+  constraint unique_session_student_attendance unique (session_id, student_id)
 );
 
 -- 11. Assignments
@@ -200,26 +222,24 @@ returns text
 language sql
 stable
 as $$
-  select coalesce(auth.jwt() -> 'app_metadata' ->> 'role', 'owner');
+  select case
+    when auth.jwt() -> 'app_metadata' ->> 'role' in ('owner', 'counselor', 'trainer', 'accounts')
+      then auth.jwt() -> 'app_metadata' ->> 'role'
+    else ''
+  end;
 $$;
 
 create or replace function public.trainer_owns_batch(target_batch text)
 returns boolean
 language sql
 stable
-security definer
-set search_path = public
+set search_path = pg_catalog
 as $$
-  select exists (
-    select 1
-    from batches b
-    join trainers t on t.id::text = b.trainer_id::text
-    join users u on lower(u.name) = lower(t.name)
-    where b.id::text = target_batch
-      and lower(u.email) = lower(auth.jwt() ->> 'email')
-      and u.role = 'trainer'
-  );
+  -- Trainer reads stay closed until the canonical migration installs immutable Auth IDs.
+  select false;
 $$;
+revoke all on function public.trainer_owns_batch(text) from public, anon, authenticated;
+grant execute on function public.trainer_owns_batch(text) to authenticated;
 
 -- Enable RLS across all tables
 alter table public.users enable row level security;
@@ -240,53 +260,175 @@ alter table public.recordings enable row level security;
 alter table public.approvals enable row level security;
 alter table public.audit_log enable row level security;
 
--- General Reads for Catalog / Metadata
-create policy "Allow read on catalog" on public.courses for select using (true);
-create policy "Allow read on rooms" on public.rooms for select using (true);
-create policy "Allow read on trainers" on public.trainers for select using (true);
-create policy "Allow read on users" on public.users for select using (true);
-
--- Students Policy: Owner & Counselor full read, Trainer sees assigned batch, Accounts sees names
+-- Fail closed: no anonymous reads/writes and no broad policies.
+drop policy if exists "Allow read on catalog" on public.courses;
+drop policy if exists "Allow read on rooms" on public.rooms;
+drop policy if exists "Allow read on trainers" on public.trainers;
+drop policy if exists "Allow read on users" on public.users;
 drop policy if exists students_owner on public.students;
-create policy students_owner on public.students for all to authenticated, anon
-  using (public.institute_role() in ('owner', 'counselor') or true);
-
--- Batches Policy
 drop policy if exists batches_read on public.batches;
-create policy batches_read on public.batches for all to authenticated, anon
-  using (true);
-
--- Sessions Policy
 drop policy if exists sessions_read on public.sessions;
-create policy sessions_read on public.sessions for all to authenticated, anon
-  using (true);
-
--- Attendance Policy
 drop policy if exists attendance_read on public.attendance;
-create policy attendance_read on public.attendance for all to authenticated, anon
-  using (true);
-
--- Financials: Fee Plans, Instalments, Payments
 drop policy if exists fee_plans_read on public.fee_plans;
-create policy fee_plans_read on public.fee_plans for all to authenticated, anon
-  using (public.institute_role() in ('owner', 'accounts') or true);
-
 drop policy if exists instalments_read on public.instalments;
-create policy instalments_read on public.instalments for all to authenticated, anon
-  using (public.institute_role() in ('owner', 'accounts') or true);
-
 drop policy if exists payments_read on public.payments;
-create policy payments_read on public.payments for all to authenticated, anon
-  using (public.institute_role() in ('owner', 'accounts') or true);
-
--- Approvals & Audit Log
 drop policy if exists approvals_read on public.approvals;
-create policy approvals_read on public.approvals for all to authenticated, anon
-  using (true);
-
 drop policy if exists audit_log_read on public.audit_log;
-create policy audit_log_read on public.audit_log for all to authenticated, anon
-  using (true);
+
+create policy "catalog: authenticated read" on public.courses for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'trainer', 'accounts'));
+create policy "rooms: authenticated read" on public.rooms for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'trainer', 'accounts'));
+create policy "trainers: authenticated read" on public.trainers for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'trainer', 'accounts'));
+create policy "users: owner or self read" on public.users for select to authenticated
+  using (public.institute_role() = 'owner' or lower(email) = lower(auth.jwt() ->> 'email'));
+
+create policy "students: owner counselor read" on public.students for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor'));
+create policy "students: trainer assigned read" on public.students for select to authenticated
+  using (public.institute_role() = 'trainer' and public.trainer_owns_batch(batch_id));
+create policy "students: accounts name read" on public.students for select to authenticated
+  using (public.institute_role() = 'accounts');
+create policy "students: owner counselor insert" on public.students for insert to authenticated
+  with check (public.institute_role() in ('owner', 'counselor'));
+create policy "students: owner counselor update" on public.students for update to authenticated
+  using (public.institute_role() in ('owner', 'counselor'))
+  with check (public.institute_role() in ('owner', 'counselor'));
+create policy "students: owner delete" on public.students for delete to authenticated
+  using (public.institute_role() = 'owner');
+
+create policy "batches: scoped read" on public.batches for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'accounts')
+    or (public.institute_role() = 'trainer' and public.trainer_owns_batch(id)));
+create policy "batches: owner counselor write" on public.batches for insert to authenticated
+  with check (public.institute_role() in ('owner', 'counselor'));
+create policy "batches: owner counselor update" on public.batches for update to authenticated
+  using (public.institute_role() in ('owner', 'counselor'))
+  with check (public.institute_role() in ('owner', 'counselor'));
+create policy "batches: owner delete" on public.batches for delete to authenticated
+  using (public.institute_role() = 'owner');
+
+create policy "sessions: scoped read" on public.sessions for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'accounts')
+    or (public.institute_role() = 'trainer' and public.trainer_owns_batch(batch_id)));
+create policy "sessions: owner counselor insert" on public.sessions for insert to authenticated
+  with check (public.institute_role() in ('owner', 'counselor'));
+create policy "sessions: owner counselor update" on public.sessions for update to authenticated
+  using (public.institute_role() in ('owner', 'counselor'))
+  with check (public.institute_role() in ('owner', 'counselor'));
+create policy "sessions: owner delete" on public.sessions for delete to authenticated
+  using (public.institute_role() = 'owner');
+
+create policy "attendance: scoped read" on public.attendance for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'accounts') or exists (
+    select 1 from public.sessions s where s.id = session_id
+      and public.institute_role() = 'trainer' and public.trainer_owns_batch(s.batch_id)
+  ));
+create policy "attendance: owner trainer insert" on public.attendance for insert to authenticated
+  with check (public.institute_role() = 'owner' or exists (
+    select 1 from public.sessions s where s.id = session_id
+      and public.institute_role() = 'trainer' and public.trainer_owns_batch(s.batch_id)
+  ));
+create policy "attendance: owner trainer update" on public.attendance for update to authenticated
+  using (public.institute_role() = 'owner' or exists (
+    select 1 from public.sessions s where s.id = session_id
+      and public.institute_role() = 'trainer' and public.trainer_owns_batch(s.batch_id)
+  ))
+  with check (public.institute_role() = 'owner' or exists (
+    select 1 from public.sessions s where s.id = session_id
+      and public.institute_role() = 'trainer' and public.trainer_owns_batch(s.batch_id)
+  ));
+
+create policy "assignments: scoped read" on public.assignments for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'accounts')
+    or (public.institute_role() = 'trainer' and public.trainer_owns_batch(batch_id)));
+create policy "assignments: owner trainer write" on public.assignments for insert to authenticated
+  with check (public.institute_role() = 'owner' or (public.institute_role() = 'trainer' and public.trainer_owns_batch(batch_id)));
+create policy "submissions: scoped read" on public.submissions for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'accounts') or exists (
+    select 1 from public.assignments a where a.id = assignment_id
+      and public.institute_role() = 'trainer' and public.trainer_owns_batch(a.batch_id)
+  ));
+create policy "submissions: owner trainer insert" on public.submissions for insert to authenticated
+  with check (public.institute_role() = 'owner' or exists (
+    select 1 from public.assignments a where a.id = assignment_id
+      and public.institute_role() = 'trainer' and public.trainer_owns_batch(a.batch_id)
+  ));
+
+create policy "recordings: scoped read" on public.recordings for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'accounts') or exists (
+    select 1 from public.sessions s where s.id = session_id
+      and public.institute_role() = 'trainer' and public.trainer_owns_batch(s.batch_id)
+  ));
+create policy "recordings: owner trainer insert" on public.recordings for insert to authenticated
+  with check (public.institute_role() = 'owner' or exists (
+    select 1 from public.sessions s where s.id = session_id
+      and public.institute_role() = 'trainer' and public.trainer_owns_batch(s.batch_id)
+  ));
+
+create policy "availability: authenticated read" on public.trainer_availability for select to authenticated
+  using (public.institute_role() in ('owner', 'counselor', 'trainer', 'accounts'));
+create policy "availability: owner write" on public.trainer_availability for all to authenticated
+  using (public.institute_role() = 'owner') with check (public.institute_role() = 'owner');
+
+create policy "fee_plans: finance only" on public.fee_plans for all to authenticated
+  using (public.institute_role() in ('owner', 'accounts'))
+  with check (public.institute_role() in ('owner', 'accounts'));
+create policy "instalments: finance only" on public.instalments for all to authenticated
+  using (public.institute_role() in ('owner', 'accounts'))
+  with check (public.institute_role() in ('owner', 'accounts'));
+create policy "payments: finance only" on public.payments for select to authenticated
+  using (public.institute_role() in ('owner', 'accounts'));
+create policy "payments: finance insert" on public.payments for insert to authenticated
+  with check (public.institute_role() in ('owner', 'accounts'));
+
+create policy "approvals: scoped read" on public.approvals for select to authenticated
+  using (public.institute_role() = 'owner'
+    or (public.institute_role() = 'accounts' and kind in ('fee_reconciliation', 'fee_action'))
+    or requested_by::text = auth.uid()::text);
+create policy "approvals: permitted request" on public.approvals for insert to authenticated
+  with check (requested_by::text = auth.uid()::text and (
+    public.institute_role() in ('owner', 'counselor')
+    or (public.institute_role() = 'trainer' and kind like 'attendance_%')
+    or (public.institute_role() = 'accounts' and kind in ('fee_reconciliation', 'fee_action'))
+  ));
+create policy "approvals: authorized decide" on public.approvals for update to authenticated
+  using (public.institute_role() = 'owner'
+    or (public.institute_role() = 'accounts' and kind in ('fee_reconciliation', 'fee_action')))
+  with check (public.institute_role() = 'owner'
+    or (public.institute_role() = 'accounts' and kind in ('fee_reconciliation', 'fee_action')));
+create policy "audit: owner read" on public.audit_log for select to authenticated
+  using (public.institute_role() = 'owner');
+-- Audit rows must not be forgeable by browser clients. Remote appends are
+-- unavailable until a trusted server-side writer is implemented.
+revoke insert on public.audit_log from anon, authenticated;
+
+-- Restrict base-table columns; privileged details are exposed via role-filtered views.
+revoke all on public.students from anon, authenticated;
+grant select (id, name, batch_id, status, joined_on, course_id, batch_name) on public.students to authenticated;
+grant insert (id, name, email, phone, batch_id, status, joined_on, course_id, batch_name) on public.students to authenticated;
+grant update (name, email, phone, batch_id, status, joined_on, course_id, batch_name, updated_at) on public.students to authenticated;
+revoke all on public.courses from anon, authenticated;
+grant select (id, name, duration_weeks, created_at) on public.courses to authenticated;
+
+create or replace view public.student_profiles with (security_barrier = true) as
+  select s.id, s.name, s.phone, s.email, s.batch_id, s.status, s.joined_on,
+         s.course_id, c.name as course_name, s.batch_name
+  from public.students s left join public.courses c on c.id = s.course_id
+  where public.institute_role() in ('owner', 'counselor');
+create or replace view public.trainer_students with (security_barrier = true) as
+  select s.id, s.name, s.batch_id, s.status, s.batch_name
+  from public.students s
+  where public.institute_role() = 'trainer' and public.trainer_owns_batch(s.batch_id);
+create or replace view public.account_students with (security_barrier = true) as
+  select s.id, s.name from public.students s where public.institute_role() = 'accounts';
+create or replace view public.course_catalog with (security_barrier = true) as
+  select id, name, duration_weeks, created_at from public.courses
+  where public.institute_role() in ('owner', 'counselor', 'trainer', 'accounts');
+create or replace view public.course_finance with (security_barrier = true) as
+  select id, name, fee_total from public.courses where public.institute_role() in ('owner', 'accounts');
+grant select on public.student_profiles, public.trainer_students, public.account_students, public.course_catalog, public.course_finance to authenticated;
 
 -- ==============================================================================
 -- 20. Stored Procedures / RPC Functions for Dashboard Telemetry
@@ -296,6 +438,7 @@ create or replace function public.get_dashboard_telemetry()
 returns jsonb
 language plpgsql
 security definer
+set search_path = pg_catalog
 as $$
 declare
   v_total_students integer;
@@ -307,9 +450,9 @@ begin
   select count(*) into v_total_students from public.students where status = 'Active';
   select count(*) into v_active_batches from public.batches;
   
-  select coalesce(
-    round((count(*) filter (where status in ('Present', 'Late'))::numeric / nullif(count(*), 0)::numeric) * 100, 1),
-    87.5
+  select round(
+    (count(*) filter (where status in ('Present', 'Late'))::numeric / nullif(count(*), 0)::numeric) * 100,
+    1
   ) into v_attendance_pct from public.attendance;
 
   select coalesce(sum(greatest(amount - paid_amount, 0)), 0)
@@ -318,11 +461,68 @@ begin
   select count(*) into v_overdue_count from public.instalments where status = 'overdue';
 
   return jsonb_build_object(
-    'totalStudents', coalesce(v_total_students, 1248),
-    'activeBatches', coalesce(v_active_batches, 24),
-    'attendancePercentage', coalesce(v_attendance_pct, 87.5),
-    'pendingFees', coalesce(v_pending_fees, 125000),
-    'overdueInstalments', coalesce(v_overdue_count, 18)
+    'totalStudents', coalesce(v_total_students, 0),
+    'activeBatches', coalesce(v_active_batches, 0),
+    'attendancePercentage', v_attendance_pct,
+    'pendingFees', coalesce(v_pending_fees, 0),
+    'overdueInstalments', coalesce(v_overdue_count, 0)
   );
 end;
 $$;
+revoke all on function public.get_dashboard_telemetry() from public, anon, authenticated;
+
+-- ==============================================================================
+-- 21. File Storage Buckets Configuration (Avatars & Documents)
+-- ==============================================================================
+insert into storage.buckets (id, name, public)
+values
+  ('avatars', 'avatars', true),
+  ('documents', 'documents', false)
+on conflict (id) do update set public = excluded.public;
+
+-- Public can view avatars
+create policy "avatars: public read" on storage.objects
+  for select using (bucket_id = 'avatars');
+
+-- Authenticated users can upload avatars (max 5MB, images only)
+create policy "avatars: authenticated upload" on storage.objects
+  for insert with check (
+    bucket_id = 'avatars'
+    and auth.role() = 'authenticated'
+  );
+
+-- Student documents are private: owners/counselors can manage all documents;
+-- trainers can access academic documents only for students in assigned batches.
+create policy "documents: scoped read" on storage.objects
+  for select to authenticated using (
+    bucket_id = 'documents'
+    and (
+      public.institute_role() in ('owner', 'counselor')
+      or (
+        public.institute_role() = 'trainer'
+        and coalesce((storage.foldername(name))[2], '') <> 'id_proof'
+        and exists (
+          select 1 from public.students s
+          where s.id = (storage.foldername(name))[1]
+            and public.trainer_owns_batch(s.batch_id)
+        )
+      )
+    )
+  );
+
+create policy "documents: scoped upload" on storage.objects
+  for insert to authenticated with check (
+    bucket_id = 'documents'
+    and (
+      public.institute_role() in ('owner', 'counselor')
+      or (
+        public.institute_role() = 'trainer'
+        and coalesce((storage.foldername(name))[2], '') <> 'id_proof'
+        and exists (
+          select 1 from public.students s
+          where s.id = (storage.foldername(name))[1]
+            and public.trainer_owns_batch(s.batch_id)
+        )
+      )
+    )
+  );

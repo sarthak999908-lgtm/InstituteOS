@@ -1,6 +1,6 @@
 const allTables = {
   users: ["id", "name", "role", "email"],
-  courses: ["id", "name", "fee_total", "duration_weeks"],
+  courses: ["id", "name", "duration_weeks"],
   trainers: ["id", "name", "skills", "weekly_hours_max"],
   trainer_availability: ["trainer_id", "weekday", "start", "end"],
   rooms: ["id", "name", "capacity"],

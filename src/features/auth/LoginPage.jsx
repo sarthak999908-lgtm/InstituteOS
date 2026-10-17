@@ -1,9 +1,8 @@
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  ShieldCheck, Users, GraduationCap, Wallet,
-  Sparkles, ArrowRight, Bot, Mail, Lock, Eye, EyeOff,
-  LogIn, UserPlus, AlertCircle, CheckCircle2, ChevronDown,
+  Users, Sparkles, Mail, Lock, Eye, EyeOff,
+  LogIn, UserPlus, AlertCircle, CheckCircle2,
   Send, KeyRound, RefreshCw,
 } from "lucide-react";
 import GlassCard from "../../components/common/GlassCard.jsx";
@@ -15,58 +14,30 @@ import {
   signUpWithEmail,
   sendMagicLink,
   verifyEmailOtp,
+  signOut as supabaseSignOut,
   supabaseEnabled,
+  supabaseConfigStatus,
+  getAuthenticatedInstituteContext,
 } from "../../services/supabase.js";
+import {
+  getAuthErrorMessage,
+  getMembershipLookupErrorMessage,
+  getRegistrationErrorMessage,
+  getRegistrationSuccessMessage,
+  getSignInErrorMessage,
+  runSingleFlight,
+  validateEmailAddress,
+  validatePassword,
+} from "./authErrors.js";
+import { routeAuthorizedInstituteSession } from "./authFlow.js";
+import { SupabaseConfigurationScreen } from "./AuthStateScreens.jsx";
+import { canEnterLocalDemo, localDemoHref } from "../../lib/localDemo.js";
 
-const ROLES = [
-  {
-    value: "owner",
-    title: "Owner",
-    icon: ShieldCheck,
-    accent: "#2563EB",
-    glow: "rgba(37, 99, 235, 0.22)",
-    badge: "Full Access",
-    capability: "Institute-wide operations, financial governance, approvals & overrides",
-    details: ["Manage all batches & staff", "Approve schedule & fee replans", "Access full Copilot audit logs"],
-    demoEmail: "owner@demo.instituteos.app",
-  },
-  {
-    value: "counselor",
-    title: "Counselor",
-    icon: Users,
-    accent: "#0D9488",
-    glow: "rgba(13, 148, 136, 0.22)",
-    badge: "Admissions",
-    capability: "Admissions, student directory, batch rosters & fee status summaries",
-    details: ["Student inquiry intake", "Attendance monitoring", "Draft follow-up reminders"],
-    demoEmail: "counselor@demo.instituteos.app",
-  },
-  {
-    value: "trainer",
-    title: "Trainer",
-    icon: GraduationCap,
-    accent: "#16A34A",
-    glow: "rgba(22, 163, 74, 0.22)",
-    badge: "Academics",
-    capability: "Assigned batches, daily attendance registers & learner risk reports",
-    details: ["Mark daily attendance", "View weekly clash-free schedule", "Confidential financial mask"],
-    demoEmail: "trainer@demo.instituteos.app",
-  },
-  {
-    value: "accounts",
-    title: "Accounts",
-    icon: Wallet,
-    accent: "#F97316",
-    glow: "rgba(249, 115, 22, 0.22)",
-    badge: "Finance",
-    capability: "Fee collections, instalment schedules & bank statement reconciliation",
-    details: ["Track pending & overdue fees", "Import UPI/bank statements", "Payment candidate matching"],
-    demoEmail: "accounts@demo.instituteos.app",
-  },
-];
+const ROLE_ACCENTS = { owner: "#2563EB", counselor: "#0D9488", trainer: "#16A34A", accounts: "#F97316" };
+const OTP_SEND_FALLBACK = "Unable to send a sign-in email. New users should choose Register first; existing users can try again or ask an administrator to check email sign-in settings.";
 
 // ─── Tiny field input component ───────────────────────────────────────────────
-function AuthInput({ type = "text", placeholder, value, onChange, icon: Icon, rightSlot }) {
+function AuthInput({ type = "text", placeholder, value, onChange, icon: Icon, rightSlot, name, autoComplete, error, id }) {
   return (
     <div
       style={{
@@ -86,11 +57,17 @@ function AuthInput({ type = "text", placeholder, value, onChange, icon: Icon, ri
         </span>
       )}
       <input
+        id={id}
+        name={name}
         type={type}
         placeholder={placeholder}
         value={value}
         onChange={(e) => onChange(e.target.value)}
-        autoComplete={type === "password" ? "current-password" : "email"}
+        autoComplete={autoComplete || (type === "password" ? "current-password" : type === "email" ? "email" : "off")}
+        autoCapitalize={type === "email" ? "none" : undefined}
+        spellCheck={type === "email" ? false : undefined}
+        aria-invalid={Boolean(error)}
+        aria-describedby={error ? `${id}-error` : undefined}
         style={{
           flex: 1,
           padding: "10px 12px",
@@ -107,153 +84,187 @@ function AuthInput({ type = "text", placeholder, value, onChange, icon: Icon, ri
   );
 }
 
-// ─── Role dropdown for sign-up ────────────────────────────────────────────────
-function RoleSelect({ value, onChange }) {
-  return (
-    <div style={{ position: "relative" }}>
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        style={{
-          width: "100%",
-          padding: "10px 36px 10px 12px",
-          background: "var(--surface-2)",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--radius-sm)",
-          color: "var(--text-primary)",
-          fontSize: "13.5px",
-          fontFamily: "inherit",
-          outline: "none",
-          appearance: "none",
-          cursor: "pointer",
-        }}
-      >
-        {ROLES.map((r) => (
-          <option key={r.value} value={r.value}>{r.title}</option>
-        ))}
-      </select>
-      <ChevronDown
-        size={14}
-        style={{
-          position: "absolute", right: 10, top: "50%", transform: "translateY(-50%)",
-          color: "var(--text-muted)", pointerEvents: "none",
-        }}
-      />
-    </div>
-  );
+function InlineFieldError({ id, children }) {
+  if (!children) return null;
+  return <p id={id} role="alert" style={{ margin: "-5px 0 0 4px", color: "#B91C1C", fontSize: 12 }}>{children}</p>;
 }
 
 // ─── Main Login Page ──────────────────────────────────────────────────────────
-export default function LoginPage({ role, onRoleChange, onLogin }) {
-  const [selectedRole, setSelectedRole] = useState(role);
+export default function LoginPage({ onRoleChange, onLogin, onUnlinkedAccount = () => {}, authNotice = "" }) {
   const [expandingRole, setExpandingRole] = useState(null);
 
   // Auth form state
-  const [authTab, setAuthTab] = useState("demo"); // "demo" | "signin" | "signup" | "otp"
+  const [authTab, setAuthTab] = useState("signin");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [name, setName] = useState("");
-  const [signupRole, setSignupRole] = useState("counselor");
   const [showPass, setShowPass] = useState(false);
   const [authLoading, setAuthLoading] = useState(false);
   const [authError, setAuthError] = useState("");
   const [authSuccess, setAuthSuccess] = useState("");
+  const [fieldErrors, setFieldErrors] = useState({});
 
   // OTP state
   const [otpSent, setOtpSent] = useState(false);
   const [otpCode, setOtpCode] = useState("");
   const [otpEmail, setOtpEmail] = useState("");
+  const registrationPendingRef = useRef(false);
+  const expandingRoleTitle = expandingRole ? `${expandingRole[0].toUpperCase()}${expandingRole.slice(1)}` : "InstituteOS";
+  const expandingRoleAccent = ROLE_ACCENTS[expandingRole] || ROLE_ACCENTS.owner;
 
-  // ── Demo mode handlers ──────────────────────────────────────────────────────
-  const handleSelectRole = (r) => {
-    sound.tick();
-    setSelectedRole(r.value);
-    onRoleChange(r.value);
-  };
-
-  const handleDemoLaunch = () => {
-    sound.chime();
-    setExpandingRole(selectedRole);
-    setTimeout(() => onLogin(), 550);
-  };
-
-  const chosenRoleObj = ROLES.find((r) => r.value === selectedRole) || ROLES[0];
+  if (!supabaseConfigStatus.configured && !canEnterLocalDemo) {
+    return <SupabaseConfigurationScreen variables={supabaseConfigStatus.issues} />;
+  }
 
   // ── Real auth handlers ──────────────────────────────────────────────────────
+  const validateFields = ({ includePassword = true } = {}) => {
+    const next = { email: validateEmailAddress(email) };
+    if (includePassword) next.password = validatePassword(password);
+    if (includePassword && authTab === "signup" && password && password.length < 6) {
+      next.password = "Password must be at least 6 characters.";
+    }
+    setFieldErrors(next);
+    return Object.values(next).every((message) => !message);
+  };
+
+  const updateEmail = (value) => {
+    setEmail(value);
+    setFieldErrors((current) => ({ ...current, email: "" }));
+  };
+
+  const updatePassword = (value) => {
+    setPassword(value);
+    setFieldErrors((current) => ({ ...current, password: "" }));
+  };
+
+  const completeInstituteLogin = async (user) => {
+    let instituteContext;
+    try {
+      instituteContext = await getAuthenticatedInstituteContext();
+    } catch {
+      setAuthError(getMembershipLookupErrorMessage());
+      return false;
+    }
+
+    if (!user?.id) {
+      setAuthError("Unable to verify the signed-in account. Please sign in again.");
+      return false;
+    }
+    if (!instituteContext) {
+      onUnlinkedAccount({ email: user.email || "", userId: user.id });
+      return false;
+    }
+
+    const authorization = routeAuthorizedInstituteSession(user, instituteContext, {
+      onRoleChange,
+      onLogin: (sessionUser, userRole, context) => {
+        setTimeout(() => onLogin(sessionUser, userRole, context), 550);
+      },
+    });
+    if (!authorization) {
+      onUnlinkedAccount({ email: user.email || "", userId: user.id });
+      return false;
+    }
+    sound.chime();
+    setExpandingRole(authorization.role);
+    return true;
+  };
+
   const handleSignIn = async () => {
-    if (!email || !password) { setAuthError("Please enter your email and password."); return; }
+    if (!validateFields()) return;
+    if (!supabaseEnabled) { setAuthError("Supabase is not configured."); return; }
     setAuthLoading(true);
     setAuthError("");
-    const { user, error } = await signInWithEmail(email, password);
-    setAuthLoading(false);
-    if (error) { setAuthError(error.message || "Sign in failed"); return; }
-    const userRole = user?.role || user?.app_metadata?.role || ((email || "").toLowerCase().includes("owner") || (email || "").toLowerCase().includes("admin") ? "owner" : "counselor");
-    onRoleChange(userRole);
-    sound.chime();
-    setExpandingRole(userRole);
-    setTimeout(() => onLogin(user), 550);
+    setAuthSuccess("");
+    try {
+      const { user, error } = await signInWithEmail(email.trim(), password);
+      if (error) { setAuthError(getSignInErrorMessage(error)); return; }
+      if (!user) { setAuthError("Unable to sign in. Please try again."); return; }
+      await completeInstituteLogin(user);
+    } catch (error) {
+      setAuthError(getSignInErrorMessage(error));
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const handleSignUp = async () => {
-    if (!email || !password) { setAuthError("Email and password are required."); return; }
-    if (password.length < 6) { setAuthError("Password must be at least 6 characters."); return; }
-    setAuthLoading(true);
-    setAuthError("");
-    const { user, error } = await signUpWithEmail(email, password, signupRole, name);
-    setAuthLoading(false);
-    if (error) { setAuthError(error.message || "Registration failed"); return; }
-    const userRole = user?.role || user?.app_metadata?.role || signupRole;
-    onRoleChange(userRole);
-    sound.chime();
-    setExpandingRole(userRole);
-    setTimeout(() => onLogin(user), 550);
+    if (registrationPendingRef.current) return;
+    if (!validateFields()) return;
+    if (!supabaseEnabled) { setAuthError("Supabase is not configured."); return; }
+    await runSingleFlight(registrationPendingRef, async () => {
+      setAuthLoading(true);
+      setAuthError("");
+      setAuthSuccess("");
+      try {
+        const { user, session, error } = await signUpWithEmail(email.trim(), password, name.trim());
+        if (error) { setAuthError(getRegistrationErrorMessage(error)); return; }
+        if (!user) { setAuthError("Supabase did not return a new account. Please try again later."); return; }
+        if (session) await supabaseSignOut();
+        setAuthSuccess(getRegistrationSuccessMessage(session));
+      } catch (error) {
+        setAuthError(getRegistrationErrorMessage(error));
+      } finally {
+        setAuthLoading(false);
+      }
+    });
   };
 
   // ── Email OTP (Magic Link) handlers ─────────────────────────────────────────
   const handleSendOtp = async () => {
-    if (!email) { setAuthError("Please enter your email address."); return; }
+    if (!validateFields({ includePassword: false })) return;
+    if (!supabaseEnabled) { setAuthError("Supabase is not configured."); return; }
     setAuthLoading(true);
     setAuthError("");
     setAuthSuccess("");
-    const res = await sendMagicLink(email);
-    setAuthLoading(false);
-    if (res?.error) { setAuthError(res.error.message || "Could not send OTP"); return; }
-    setOtpSent(true);
-    setOtpEmail(email);
-    sound.tick();
-    const codeNotice = res?.otp ? ` (Verification code: ${res.otp})` : "";
-    setAuthSuccess(`Magic link & OTP code sent to ${email}!${codeNotice} Enter the code below or click verify.`);
-    if (res?.otp) setOtpCode(res.otp);
+    try {
+      const res = await sendMagicLink(email.trim());
+      if (res?.error) { setAuthError(getAuthErrorMessage(res.error, OTP_SEND_FALLBACK)); return; }
+      setOtpSent(true);
+      setOtpEmail(email.trim());
+      sound.tick();
+      setAuthSuccess("Check your inbox for your sign-in link or verification code.");
+    } catch (error) {
+      setAuthError(getAuthErrorMessage(error, OTP_SEND_FALLBACK));
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const handleVerifyOtp = async () => {
-    if (!otpCode || otpCode.length < 6) { setAuthError("Please enter the 6-digit code."); return; }
+    if (!otpCode || otpCode.length !== 6) { setAuthError("Please enter the 6-digit code."); return; }
     setAuthLoading(true);
     setAuthError("");
-    const { user, error } = await verifyEmailOtp(otpEmail, otpCode.trim());
-    setAuthLoading(false);
-    if (error) { setAuthError(error.message || "Verification failed"); return; }
-    const userRole = user?.role || user?.app_metadata?.role || ((otpEmail || "").toLowerCase().includes("owner") || (otpEmail || "").toLowerCase().includes("admin") ? "owner" : "counselor");
-    onRoleChange(userRole);
-    sound.chime();
-    setExpandingRole(userRole);
-    setTimeout(() => onLogin(user), 550);
+    try {
+      const { user, error } = await verifyEmailOtp(otpEmail, otpCode.trim());
+      if (error) { setAuthError(getAuthErrorMessage(error, "Verification failed. Check the code and try again.")); return; }
+      if (!user) { setAuthError("Unable to verify the sign-in code. Please try again."); return; }
+      await completeInstituteLogin(user);
+    } catch (error) {
+      setAuthError(getAuthErrorMessage(error, "Verification failed. Check the code and try again."));
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const handleResendOtp = async () => {
+    if (!supabaseEnabled) { setAuthError("Supabase is not configured."); return; }
     setAuthLoading(true);
     setAuthError("");
-    const res = await sendMagicLink(otpEmail);
-    setAuthLoading(false);
-    if (res?.error) { setAuthError(res.error.message); return; }
-    sound.tick();
-    const codeNotice = res?.otp ? ` (Code: ${res.otp})` : "";
-    setAuthSuccess(`New code sent!${codeNotice} Check your inbox.`);
-    if (res?.otp) setOtpCode(res.otp);
+    try {
+      const res = await sendMagicLink(otpEmail);
+      if (res?.error) { setAuthError(getAuthErrorMessage(res.error, OTP_SEND_FALLBACK)); return; }
+      sound.tick();
+      setAuthSuccess("A new sign-in link or verification code was sent. Check your inbox.");
+    } catch (error) {
+      setAuthError(getAuthErrorMessage(error, OTP_SEND_FALLBACK));
+    } finally {
+      setAuthLoading(false);
+    }
   };
 
   const handleKeyDown = (e) => {
-    if (e.key === "Enter") {
+    if (e.key === "Enter" && !authLoading) {
       if (authTab === "signin") handleSignIn();
       else if (authTab === "signup") handleSignUp();
       else if (authTab === "otp" && !otpSent) handleSendOtp();
@@ -286,7 +297,7 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
             transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
             style={{
               position: "fixed", inset: 0, zIndex: 99999,
-              background: `radial-gradient(circle at center, ${chosenRoleObj.accent} 0%, var(--bg-0) 80%)`,
+              background: `radial-gradient(circle at center, ${expandingRoleAccent} 0%, var(--bg-0) 80%)`,
               display: "grid", placeItems: "center",
             }}
           >
@@ -302,7 +313,7 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
               }}
             >
               <Sparkles size={28} color="#ffffff" />
-              Entering {(ROLES.find((r) => r.value === expandingRole) || ROLES[0]).title} Workspace…
+              Entering {expandingRoleTitle} Workspace…
             </motion.div>
           </motion.div>
         )}
@@ -348,14 +359,14 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
           }}
         >
           {[
-            { id: "demo", label: "Demo Mode" },
             { id: "otp", label: "Email OTP" },
             { id: "signin", label: "Sign In" },
             { id: "signup", label: "Register" },
           ].map(({ id, label }) => (
             <button
               key={id}
-              onClick={() => { sound.tick(); setAuthTab(id); setAuthError(""); setAuthSuccess(""); if (id !== "otp") { setOtpSent(false); setOtpCode(""); } }}
+              type="button"
+              onClick={() => { sound.tick(); setAuthTab(id); setAuthError(""); setAuthSuccess(""); setFieldErrors({}); if (id !== "otp") { setOtpSent(false); setOtpCode(""); } }}
               style={{
                 padding: "7px 18px", borderRadius: "var(--radius-sm)",
                 border: "none", cursor: "pointer",
@@ -371,101 +382,13 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
           ))}
         </div>
 
+        {authNotice && (
+          <div role="status" style={{ maxWidth: 400, margin: "-14px auto 16px", padding: "10px 12px", borderRadius: "var(--radius-sm)", background: "#FFFBEB", border: "1px solid #FCD34D", color: "#92400E", fontSize: 12.5 }}>
+            {authNotice}
+          </div>
+        )}
+
         <AnimatePresence mode="wait">
-
-          {/* ─── DEMO MODE ──────────────────────────────────────────────── */}
-          {authTab === "demo" && (
-            <motion.div
-              key="demo"
-              initial={{ opacity: 0, y: 12 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -8 }}
-              transition={{ duration: 0.2 }}
-            >
-              <div
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: "repeat(auto-fit, minmax(230px, 1fr))",
-                  gap: 18, marginBottom: 28,
-                }}
-              >
-                {ROLES.map((item) => {
-                  const isSelected = selectedRole === item.value;
-                  const Icon = item.icon;
-                  return (
-                    <GlassCard
-                      key={item.value}
-                      onClick={() => handleSelectRole(item)}
-                      style={{
-                        padding: 22, textAlign: "left", cursor: "pointer",
-                        border: isSelected ? `2px solid ${item.accent}` : "1px solid var(--border)",
-                        boxShadow: isSelected
-                          ? `0 12px 30px -8px ${item.glow}, 0 0 0 1px ${item.accent}`
-                          : "var(--shadow-card)",
-                        background: "var(--surface)",
-                        transform: isSelected ? "translateY(-3px)" : "none",
-                        transition: "border-color 0.2s, box-shadow 0.2s, background 0.2s",
-                      }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-                        <div
-                          style={{
-                            width: 42, height: 42, borderRadius: 10,
-                            background: isSelected ? item.accent : "var(--surface-2)",
-                            border: `1px solid ${isSelected ? item.accent : "var(--border)"}`,
-                            display: "grid", placeItems: "center",
-                            color: isSelected ? "#ffffff" : item.accent,
-                          }}
-                        >
-                          <Icon size={20} />
-                        </div>
-                        <span
-                          style={{
-                            fontSize: "10px", fontWeight: 700,
-                            textTransform: "uppercase", letterSpacing: "0.08em",
-                            padding: "3px 8px", borderRadius: 12,
-                            background: isSelected ? `${item.accent}1A` : "var(--surface-2)",
-                            color: isSelected ? item.accent : "var(--text-muted)",
-                          }}
-                        >
-                          {item.badge}
-                        </span>
-                      </div>
-                      <h3 style={{ fontFamily: "'Space Grotesk', sans-serif", fontSize: "19px", fontWeight: 700, color: "var(--text-primary)", marginBottom: 6 }}>
-                        {item.title}
-                      </h3>
-                      <p style={{ fontSize: "12px", color: "var(--text-secondary)", lineHeight: 1.45, marginBottom: 14, minHeight: 34 }}>
-                        {item.capability}
-                      </p>
-                      <div style={{ display: "flex", flexDirection: "column", gap: 5 }}>
-                        {item.details.map((d, i) => (
-                          <div key={i} style={{ fontSize: "11px", color: "var(--text-muted)", display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ width: 4, height: 4, borderRadius: "50%", background: item.accent }} />
-                            <span>{d}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </GlassCard>
-                  );
-                })}
-              </div>
-
-              <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
-                <MagneticButton
-                  variant="primary"
-                  onClick={handleDemoLaunch}
-                  style={{ padding: "12px 34px", fontSize: "15px", borderRadius: "var(--radius-md)" }}
-                >
-                  Enter as {chosenRoleObj.title}
-                  <ArrowRight size={16} />
-                </MagneticButton>
-                <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: "12px", color: "var(--text-muted)" }}>
-                  <Bot size={14} color="var(--accent-primary)" />
-                  <span>Role-scoped SQLite security policies are enforced on all queries and actions.</span>
-                </div>
-              </div>
-            </motion.div>
-          )}
 
           {/* ─── EMAIL OTP (MAGIC LINK) ───────────────────────────────────── */}
           {authTab === "otp" && (
@@ -489,7 +412,7 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                 <p style={{ fontSize: "13px", color: "var(--text-secondary)", marginBottom: 20 }}>
                   {otpSent
                     ? `We sent a magic link and 6-digit code to ${otpEmail}`
-                    : "No password required — we'll send a login link to your email."
+                    : "For existing accounts. New here? Choose Register first; OTP sign-in does not create accounts."
                   }
                 </p>
 
@@ -498,37 +421,16 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                   <div style={{ display: "flex", flexDirection: "column", gap: 12 }} onKeyDown={handleKeyDown}>
                     <AuthInput
                       type="email"
-                      placeholder="you@institute.app"
+                      placeholder="you@gmail.com"
                       value={email}
-                      onChange={setEmail}
+                      onChange={updateEmail}
+                      name="email"
+                      autoComplete="email"
+                      id="otp-email"
+                      error={fieldErrors.email}
                       icon={Mail}
                     />
-                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
-                      <span style={{ fontSize: "11px", color: "var(--text-muted)", width: "100%" }}>Quick email login:</span>
-                      {[
-                        { label: "Admin (Owner)", email: "admin@instituteos.app" },
-                        { label: "Counselor", email: "counselor@demo.instituteos.app" },
-                        { label: "Trainer", email: "trainer@demo.instituteos.app" },
-                        { label: "Accounts", email: "accounts@demo.instituteos.app" },
-                      ].map((item) => (
-                        <button
-                          key={item.email}
-                          type="button"
-                          onClick={() => { setEmail(item.email); sound.tick(); }}
-                          style={{
-                            fontSize: "11px",
-                            padding: "3px 8px",
-                            borderRadius: 6,
-                            background: "var(--surface-2)",
-                            border: "1px solid var(--border)",
-                            color: "var(--accent-primary)",
-                            cursor: "pointer",
-                          }}
-                        >
-                          {item.label}
-                        </button>
-                      ))}
-                    </div>
+                    <InlineFieldError id="otp-email-error">{fieldErrors.email}</InlineFieldError>
                   </div>
                 ) : (
                   /* Step 2: Enter 6-digit OTP code */
@@ -538,6 +440,9 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                       placeholder="Enter 6-digit code"
                       value={otpCode}
                       onChange={(v) => setOtpCode(v.replace(/[^0-9]/g, "").slice(0, 6))}
+                      name="one-time-code"
+                      autoComplete="one-time-code"
+                      id="otp-code"
                       icon={KeyRound}
                     />
                     <div style={{ display: "flex", alignItems: "center", gap: 6, fontSize: "12px", color: "var(--text-muted)" }}>
@@ -574,6 +479,7 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                 <MagneticButton
                   variant="primary"
                   onClick={otpSent ? handleVerifyOtp : handleSendOtp}
+                  disabled={authLoading}
                   style={{ width: "100%", marginTop: 18, padding: "11px", fontSize: "14px", justifyContent: "center", opacity: authLoading ? 0.7 : 1 }}
                 >
                   {authLoading
@@ -624,16 +530,25 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                 <div style={{ display: "flex", flexDirection: "column", gap: 12 }} onKeyDown={handleKeyDown}>
                   <AuthInput
                     type="email"
-                    placeholder="you@institute.app"
+                    placeholder="you@gmail.com"
                     value={email}
-                    onChange={setEmail}
+                    onChange={updateEmail}
+                    name="username"
+                    autoComplete="username"
+                    id="signin-email"
+                    error={fieldErrors.email}
                     icon={Mail}
                   />
+                  <InlineFieldError id="signin-email-error">{fieldErrors.email}</InlineFieldError>
                   <AuthInput
                     type={showPass ? "text" : "password"}
                     placeholder="Password"
                     value={password}
-                    onChange={setPassword}
+                    onChange={updatePassword}
+                    name="password"
+                    autoComplete="current-password"
+                    id="signin-password"
+                    error={fieldErrors.password}
                     icon={Lock}
                     rightSlot={
                       <button
@@ -645,32 +560,7 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                       </button>
                     }
                   />
-                  <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginTop: 2 }}>
-                    <span style={{ fontSize: "11px", color: "var(--text-muted)", width: "100%" }}>Quick email login:</span>
-                    {[
-                      { label: "Admin (Owner)", email: "admin@instituteos.app" },
-                      { label: "Counselor", email: "counselor@demo.instituteos.app" },
-                      { label: "Trainer", email: "trainer@demo.instituteos.app" },
-                      { label: "Accounts", email: "accounts@demo.instituteos.app" },
-                    ].map((item) => (
-                      <button
-                        key={item.email}
-                        type="button"
-                        onClick={() => { setEmail(item.email); setPassword("admin123"); sound.tick(); }}
-                        style={{
-                          fontSize: "11px",
-                          padding: "3px 8px",
-                          borderRadius: 6,
-                          background: "var(--surface-2)",
-                          border: "1px solid var(--border)",
-                          color: "var(--accent-primary)",
-                          cursor: "pointer",
-                        }}
-                      >
-                        {item.label}
-                      </button>
-                    ))}
-                  </div>
+                  <InlineFieldError id="signin-password-error">{fieldErrors.password}</InlineFieldError>
                 </div>
 
                 {authError && (
@@ -689,6 +579,7 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                 <MagneticButton
                   variant="primary"
                   onClick={handleSignIn}
+                  disabled={authLoading}
                   style={{ width: "100%", marginTop: 18, padding: "11px", fontSize: "14px", justifyContent: "center", opacity: authLoading ? 0.7 : 1 }}
                 >
                   {authLoading ? "Signing in…" : <><LogIn size={15} /> Sign In</>}
@@ -728,20 +619,32 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                     placeholder="Full name"
                     value={name}
                     onChange={setName}
+                    name="name"
+                    autoComplete="name"
+                    id="signup-name"
                     icon={Users}
                   />
                   <AuthInput
                     type="email"
-                    placeholder="you@institute.app"
+                    placeholder="you@gmail.com"
                     value={email}
-                    onChange={setEmail}
+                    onChange={updateEmail}
+                    name="email"
+                    autoComplete="email"
+                    id="signup-email"
+                    error={fieldErrors.email}
                     icon={Mail}
                   />
+                  <InlineFieldError id="signup-email-error">{fieldErrors.email}</InlineFieldError>
                   <AuthInput
                     type={showPass ? "text" : "password"}
                     placeholder="Password (min 6 chars)"
                     value={password}
-                    onChange={setPassword}
+                    onChange={updatePassword}
+                    name="new-password"
+                    autoComplete="new-password"
+                    id="signup-password"
+                    error={fieldErrors.password}
                     icon={Lock}
                     rightSlot={
                       <button
@@ -753,10 +656,8 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                       </button>
                     }
                   />
-                  <div>
-                    <label style={{ fontSize: "12px", color: "var(--text-muted)", marginBottom: 5, display: "block" }}>Role</label>
-                    <RoleSelect value={signupRole} onChange={setSignupRole} />
-                  </div>
+                  <InlineFieldError id="signup-password-error">{fieldErrors.password}</InlineFieldError>
+                  <p style={{ fontSize: "12px", color: "var(--text-muted)", margin: 0 }}>An administrator assigns staff roles after account creation.</p>
                 </div>
 
                 {authError && (
@@ -775,6 +676,7 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
                 <MagneticButton
                   variant="primary"
                   onClick={handleSignUp}
+                  disabled={authLoading}
                   style={{ width: "100%", marginTop: 18, padding: "11px", fontSize: "14px", justifyContent: "center", opacity: authLoading ? 0.7 : 1 }}
                 >
                   {authLoading ? "Creating account…" : <><UserPlus size={15} /> Create Account</>}
@@ -791,6 +693,14 @@ export default function LoginPage({ role, onRoleChange, onLogin }) {
           )}
 
         </AnimatePresence>
+        {canEnterLocalDemo && (
+          <div style={{ marginTop: 20, padding: "14px 16px", borderRadius: 14, background: "rgba(255,255,255,.88)", border: "1px solid var(--border)", textAlign: "center" }}>
+            <p style={{ margin: "0 0 10px", color: "var(--text-secondary)", fontSize: 13 }}>Try the app with fictional records. This local demo does not use Supabase or send backend requests.</p>
+            <MagneticButton variant="secondary" onClick={() => window.location.assign(localDemoHref())} style={{ justifyContent: "center" }}>
+              Open local demo
+            </MagneticButton>
+          </div>
+        )}
       </div>
     </main>
   );

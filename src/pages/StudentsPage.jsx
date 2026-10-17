@@ -12,13 +12,14 @@ import StudentDrawer from "../components/common/Drawer.jsx";
 import { INITIAL_STUDENTS } from "../data.js";
 import { sound } from "../lib/sound.js";
 import { toast } from "../components/common/Toast.jsx";
-import { getStudents, createStudent, deleteStudent } from "../services/api.js";
+import { getStudents, createStudent, deleteStudent, requestAuditExport } from "../services/api.js";
+import { appStorageKey } from "../lib/localDemo.js";
 
 
 function loadSavedStudents(role) {
   let saved = INITIAL_STUDENTS;
   try {
-    const raw = localStorage.getItem("instituteos_students");
+    const raw = localStorage.getItem(appStorageKey("instituteos_students"));
     if (raw) {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed) && parsed.length) saved = parsed;
@@ -46,6 +47,9 @@ export default function StudentsPage({ role = "owner" }) {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [showAddModal, setShowAddModal] = useState(false);
   const [editingStudent, setEditingStudent] = useState(null);
+  // Pagination state
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(25);
 
   const [form, setForm] = useState({
     name: "",
@@ -60,7 +64,7 @@ export default function StudentsPage({ role = "owner" }) {
   useEffect(() => {
     if (!canManage) return;
     try {
-      localStorage.setItem("instituteos_students", JSON.stringify(students));
+      localStorage.setItem(appStorageKey("instituteos_students"), JSON.stringify(students));
     } catch {}
   }, [students, canManage]);
 
@@ -124,10 +128,16 @@ export default function StudentsPage({ role = "owner" }) {
     }
   };
 
-  const exportSelectedCsv = () => {
+  const exportSelectedCsv = async () => {
     sound.shimmer();
     const selectedList = students.filter((s) => selectedIds.has(s.id));
     if (!selectedList.length) return;
+    try {
+      await requestAuditExport("student_records");
+    } catch (error) {
+      toast.error("Export stopped", `The audit service could not record this export: ${error.message}`);
+      return;
+    }
     const header = ["ID", "Name", "Email", "Phone", "Course", "Batch", "Status"];
     const rows = selectedList.map((s) => [s.id, s.name, s.email, s.phone || "", s.course, s.batch || "", s.status || "Active"]);
     const csvContent = [header, ...rows].map((r) => r.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -176,6 +186,17 @@ export default function StudentsPage({ role = "owner" }) {
 
     return res;
   }, [students, search, statusFilter, sortField, sortDirection, canManage, canViewContact, canViewBatch]);
+
+  // Reset to page 1 whenever search/filter/sort changes
+  useEffect(() => { setPage(1); }, [search, statusFilter, sortField, sortDirection]);
+
+  // Paginated slice for the current page
+  const totalPages = Math.ceil(filteredAndSorted.length / pageSize) || 1;
+  const currentPage = Math.max(1, Math.min(page, totalPages));
+  const paginatedStudents = filteredAndSorted.slice(
+    (currentPage - 1) * pageSize,
+    currentPage * pageSize
+  );
 
   const handleOpenDrawer = (student) => {
     sound.tick();
@@ -462,7 +483,7 @@ export default function StudentsPage({ role = "owner" }) {
 
             {/* Table Rows with Stagger Entrance and Hover Spotlight */}
             <tbody>
-              {filteredAndSorted.map((student, idx) => {
+              {paginatedStudents.map((student, idx) => {
                 const isSelected = selectedStudent?.id === student.id;
                 const isChecked = selectedIds.has(student.id);
                 const statusLower = (student.status || "active").toLowerCase();
@@ -656,24 +677,26 @@ export default function StudentsPage({ role = "owner" }) {
                               <Edit3 size={13} />
                             </button>
 
-                            <button
-                              type="button"
-                              onClick={(e) => handleDelete(student, e)}
-                              style={{
-                                background: "var(--danger-bg)",
-                                border: "1px solid rgba(220, 38, 38, 0.25)",
-                                borderRadius: 6,
-                                width: 28,
-                                height: 28,
-                                display: "grid",
-                                placeItems: "center",
-                                color: "var(--danger)",
-                                cursor: "pointer",
-                              }}
-                              title="Delete record"
-                            >
-                              <Trash2 size={13} />
-                            </button>
+                            {role === "owner" && (
+                              <button
+                                type="button"
+                                onClick={(e) => handleDelete(student, e)}
+                                style={{
+                                  background: "var(--danger-bg)",
+                                  border: "1px solid rgba(220, 38, 38, 0.25)",
+                                  borderRadius: 6,
+                                  width: 28,
+                                  height: 28,
+                                  display: "grid",
+                                  placeItems: "center",
+                                  color: "var(--danger)",
+                                  cursor: "pointer",
+                                }}
+                                title="Delete record"
+                              >
+                                <Trash2 size={13} />
+                              </button>
+                            )}
                           </div>
                         </td>
                       </>
@@ -707,6 +730,92 @@ export default function StudentsPage({ role = "owner" }) {
             </tbody>
           </table>
         </div>
+
+        {/* Pagination Bar */}
+        {filteredAndSorted.length > 0 && (
+          <div style={{
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexWrap: "wrap",
+            gap: 12,
+            padding: "12px 20px",
+            borderTop: "1px solid var(--border)",
+          }}>
+            <span style={{ fontSize: "12px", color: "var(--text-muted)" }}>
+              Showing{" "}
+              <strong style={{ color: "var(--text-primary)" }}>
+                {(currentPage - 1) * pageSize + 1}–{Math.min(currentPage * pageSize, filteredAndSorted.length)}
+              </strong>{" "}
+              of{" "}
+              <strong style={{ color: "var(--text-primary)" }}>{filteredAndSorted.length}</strong>{" "}
+              students
+            </span>
+
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              {/* Page-size selector */}
+              <select
+                value={pageSize}
+                onChange={(e) => { setPageSize(Number(e.target.value)); setPage(1); }}
+                style={{
+                  fontSize: "12px",
+                  padding: "4px 8px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: "var(--surface-2)",
+                  color: "var(--text-primary)",
+                  cursor: "pointer",
+                }}
+                aria-label="Rows per page"
+              >
+                {[10, 25, 50, 100].map((n) => (
+                  <option key={n} value={n}>{n} / page</option>
+                ))}
+              </select>
+
+              {/* Prev */}
+              <button
+                onClick={() => { sound.tick(); setPage((p) => Math.max(1, p - 1)); }}
+                disabled={currentPage <= 1}
+                style={{
+                  padding: "4px 12px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: currentPage <= 1 ? "transparent" : "var(--surface-2)",
+                  color: currentPage <= 1 ? "var(--text-muted)" : "var(--text-primary)",
+                  cursor: currentPage <= 1 ? "not-allowed" : "pointer",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                }}
+              >
+                ← Prev
+              </button>
+
+              {/* Page indicator */}
+              <span style={{ fontSize: "12px", color: "var(--text-secondary)", minWidth: 70, textAlign: "center" }}>
+                Page {currentPage} / {totalPages}
+              </span>
+
+              {/* Next */}
+              <button
+                onClick={() => { sound.tick(); setPage((p) => Math.min(totalPages, p + 1)); }}
+                disabled={currentPage >= totalPages}
+                style={{
+                  padding: "4px 12px",
+                  borderRadius: 6,
+                  border: "1px solid var(--border)",
+                  background: currentPage >= totalPages ? "transparent" : "var(--surface-2)",
+                  color: currentPage >= totalPages ? "var(--text-muted)" : "var(--text-primary)",
+                  cursor: currentPage >= totalPages ? "not-allowed" : "pointer",
+                  fontSize: "12px",
+                  fontWeight: 600,
+                }}
+              >
+                Next →
+              </button>
+            </div>
+          </div>
+        )}
       </GlassCard>
 
       {/* Floating Multi-Select Bulk Actions Bar */}

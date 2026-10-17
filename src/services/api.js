@@ -1,4 +1,6 @@
-import { getSession } from "./supabase.js";
+import { getSession, supabaseEnabled } from "./supabase.js";
+import { localDemoMode } from "../lib/localDemo.js";
+import { localDemoApiResponse } from "./localDemoApi.js";
 
 const env = typeof import.meta !== "undefined" && import.meta.env ? import.meta.env : {};
 const API_BASE = env.VITE_API_URL || "http://localhost:5000/api";
@@ -13,8 +15,8 @@ async function getAuthHeaders() {
     if (session?.access_token) {
       headers["Authorization"] = `Bearer ${session.access_token}`;
     }
-  } catch (err) {
-    console.debug("Could not resolve session for API header:", err);
+  } catch {
+    console.debug("Could not resolve authenticated session for API request.");
   }
   return headers;
 }
@@ -23,6 +25,8 @@ async function getAuthHeaders() {
  * Universal fetch wrapper with automatic JWT injection and structured error handling
  */
 async function apiFetch(endpoint, options = {}) {
+  if (localDemoMode) return localDemoApiResponse(endpoint, options);
+
   const authHeaders = await getAuthHeaders();
   const mergedHeaders = { ...authHeaders, ...(options.headers || {}) };
 
@@ -97,7 +101,7 @@ export async function recordFeePayment({ studentId, instalmentId, amount, method
 
 // ── 5. Attendance ────────────────────────────────────────────────────────────
 export async function getAttendance(filters = {}) {
-  const query = new URLSearchParams(filters).toString();
+  const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined && value !== null && value !== "")).toString();
   return apiFetch(`/attendance${query ? `?${query}` : ""}`);
 }
 
@@ -123,7 +127,7 @@ export async function getRooms() {
 
 // ── 7. Sessions / Timetable ──────────────────────────────────────────────────
 export async function getSessions(filters = {}) {
-  const query = new URLSearchParams(filters).toString();
+  const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value !== undefined && value !== null && value !== "")).toString();
   return apiFetch(`/sessions${query ? `?${query}` : ""}`);
 }
 
@@ -132,6 +136,17 @@ export async function createSession(sessionData) {
     method: "POST",
     body: JSON.stringify(sessionData),
   });
+}
+
+export async function updateSession(sessionId, sessionData) {
+  return apiFetch(`/sessions/${encodeURIComponent(sessionId)}`, {
+    method: "PATCH",
+    body: JSON.stringify(sessionData),
+  });
+}
+
+export async function deleteSession(sessionId) {
+  return apiFetch(`/sessions/${encodeURIComponent(sessionId)}`, { method: "DELETE" });
 }
 
 // ── 8. Approvals Workflow ────────────────────────────────────────────────────
@@ -147,10 +162,10 @@ export async function createApproval(approvalData) {
   });
 }
 
-export async function decideApproval(id, status) {
+export async function decideApproval(id, status, payload) {
   return apiFetch(`/approvals/${id}`, {
     method: "PATCH",
-    body: JSON.stringify({ status }),
+    body: JSON.stringify({ status, ...(payload === undefined ? {} : { payload }) }),
   });
 }
 
@@ -170,10 +185,15 @@ export async function getAuditLog(limit = 50) {
   return apiFetch(`/audit-log?limit=${limit}`);
 }
 
-export async function logAuditEvent(action, tableName, recordId, details = {}) {
-  return apiFetch("/audit-log", {
+/**
+ * Require a server-side audit record before exporting remotely scoped data.
+ * Offline demo exports remain local and do not require a backend.
+ */
+export async function requestAuditExport(resource, filters) {
+  if (!supabaseEnabled) return { audited: false };
+  return apiFetch("/audit-log/export", {
     method: "POST",
-    body: JSON.stringify({ action, table_name: tableName, record_id: recordId, details }),
+    body: JSON.stringify({ resource, format: "csv", ...(filters ? { filters } : {}) }),
   });
 }
 
@@ -243,6 +263,62 @@ export async function queryCopilotBackend(prompt, intent) {
     method: "POST",
     body: JSON.stringify({ prompt, intent }),
   });
+}
+
+export async function streamCopilotBackend(question, { signal, onStage, onText } = {}) {
+  if (localDemoMode) return { mode: "local", fallbackAvailable: true, unavailableReason: "local-demo", answer: "Using the local planner." };
+  const response = await fetch(`${API_BASE}/copilot/chat`, {
+    method: "POST",
+    signal,
+    headers: await getAuthHeaders(),
+    body: JSON.stringify({ question }),
+  });
+  if (!response.ok) {
+    let message = "The Copilot request could not be completed.";
+    try { message = (await response.json())?.error || message; } catch { /* Keep a safe generic response. */ }
+    throw new Error(message);
+  }
+  if (!response.body) throw new Error("The Copilot stream is unavailable.");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let completed = null;
+  let query = null;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const events = buffer.split(/\r?\n\r?\n/);
+      buffer = events.pop() || "";
+      for (const block of events) {
+        const lines = block.split(/\r?\n/);
+        const name = lines.find((line) => line.startsWith("event:"))?.slice(6).trim();
+        const payloadText = lines.filter((line) => line.startsWith("data:")).map((line) => line.slice(5).trim()).join("\n");
+        if (!name || !payloadText) continue;
+        const payload = JSON.parse(payloadText);
+        if (name === "stage") onStage?.(payload.stage);
+        else if (name === "token") onText?.(payload.text || "", false);
+        else if (name === "reset") onText?.("", true);
+        else if (name === "query") query = payload;
+        else if (name === "complete") completed = payload;
+        else if (name === "error") throw new Error(payload.error || "The Copilot request failed.");
+      }
+    }
+  } catch (error) {
+    try { await reader.cancel(); } catch { /* The stream may already be closed. */ }
+    throw error;
+  }
+  if (!completed) throw new Error("The Copilot stream ended before completing.");
+  return { ...completed, ...(query || {}) };
+}
+
+export async function auditCopilotEvent(event, detail) {
+  return apiFetch("/copilot/audit", { method: "POST", body: JSON.stringify({ event, detail }) });
+}
+
+export async function submitCopilotFeedback(answerId, feedback) {
+  return apiFetch("/copilot/feedback", { method: "POST", body: JSON.stringify({ answerId, feedback }) });
 }
 
 // ── 14. System Status & Diagnostics ──────────────────────────────────────────

@@ -1,42 +1,20 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
-import { listApprovals, resetLocalDatabase } from "../../lib/database.js";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { runCopilotMessage } from "../../services/copilot.js";
 
-const storage = new Map();
+describe("Copilot query boundary", () => {
+  afterEach(() => vi.unstubAllGlobals());
 
-vi.stubGlobal("localStorage", {
-  getItem: (key) => storage.get(key) ?? null,
-  setItem: (key, value) => storage.set(key, value),
-  removeItem: (key) => storage.delete(key),
-});
+  it("sends the question to the authenticated SSE backend and returns the streamed answer", async () => {
+    const fetchMock = vi.fn(async () => new Response(
+      `event: stage\ndata: {"stage":"Understanding"}\n\nevent: complete\ndata: {"mode":"ai","answer":"Attendance is ready.","answerId":"answer-test"}\n\n`,
+      { status: 200, headers: { "Content-Type": "text/event-stream" } },
+    ));
+    vi.stubGlobal("fetch", fetchMock);
 
-describe("Copilot query and action pipeline", () => {
-  beforeEach(async () => {
-    storage.clear();
-    await resetLocalDatabase();
-  });
-
-  it("returns headline Java results and drafts one WhatsApp reminder per match", async () => {
-    const result = await runCopilotMessage({
-      role: "owner",
-      userId: "USR-OWNER",
-      question: "Which students in the Java batch have missed three or more classes and have an EMI due this week? Draft a WhatsApp reminder for each.",
-    });
-    expect(result.rows.length).toBeGreaterThanOrEqual(3);
-    expect(result.sql).toMatch(/^SELECT/);
-    expect(result.sql).toMatch(/LIMIT 200$/);
-    expect(result.actionPreview.recipients).toHaveLength(result.rows.length);
-    expect(result.actionPreview.recipients[0].message).toMatch(/missed classes.*EMI.*due on/i);
-    expect((await listApprovals()).length).toBe(1);
-  });
-
-  it("refuses indirect trainer fee questions without running a query", async () => {
-    const questions = ["who hasn't paid", "show the EMI", "what is the pending amount", "who has an outstanding balance"];
-    for (const question of questions) {
-      const response = await runCopilotMessage({ role: "trainer", userId: "USR-TRAINER", question });
-      expect(response.refusal).toBe(true);
-      expect(response.sql).toBeNull();
-      expect(response.rows).toEqual([]);
-    }
+    await expect(runCopilotMessage({ question: "Show today's attendance", role: "owner", userId: "local-user" }))
+      .resolves.toMatchObject({ mode: "ai", answer: "Attendance is ready.", answerId: "answer-test" });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(String(fetchMock.mock.calls[0][0])).toContain("/copilot/chat");
+    expect(JSON.parse(fetchMock.mock.calls[0][1].body)).toEqual({ question: "Show today's attendance" });
   });
 });

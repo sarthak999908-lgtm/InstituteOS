@@ -5,9 +5,10 @@ import {
   Clock, MapPin, User, Sparkles, Filter, ChevronRight,
   LayoutGrid, BarChart3, TrendingUp, CheckCircle2
 } from "lucide-react";
-import { batches as seedBatches, rooms, trainerAvailability, trainers, users } from "../../data/mockData.js";
+import { batches as seedBatches, rooms, trainerAvailability, trainerIdByUserId, trainers } from "../../data/mockData.js";
 import { createApproval, decideApproval } from "../../lib/database.js";
-import { createApproval as apiCreateApproval, decideApproval as apiDecideApproval, createSession as apiCreateSession } from "../../services/api.js";
+import { createSession as apiCreateSession } from "../../services/api.js";
+import { appStorageKey } from "../../lib/localDemo.js";
 import { solveSchedule } from "./solver.js";
 
 import GlassCard from "../../components/common/GlassCard.jsx";
@@ -53,7 +54,7 @@ const COURSE_THEMES = {
 
 function initialGrid() {
   try {
-    const parsed = JSON.parse(localStorage.getItem("instituteos_solved_schedule") || "null");
+    const parsed = JSON.parse(localStorage.getItem(appStorageKey("instituteos_solved_schedule")) || "null");
     if (Array.isArray(parsed) && parsed.length) return parsed;
   } catch {}
 
@@ -75,9 +76,9 @@ function formatDay(day) {
 
 function makeInput(role, userId) {
   if (role !== "trainer") return { batches: seedBatches, trainers, rooms, availability: trainerAvailability };
-  const user = users.find((item) => item.id === userId);
-  const trainer = trainers.find((item) => item.name === user?.name);
-  const assigned = seedBatches.filter((batch) => batch.trainer_id === trainer?.id);
+  const trainerId = trainerIdByUserId[userId];
+  const trainer = trainers.find((item) => item.id === trainerId);
+  const assigned = seedBatches.filter((batch) => batch.trainer_id === trainerId);
   return {
     batches: assigned,
     trainers: trainer ? [trainer] : [],
@@ -158,9 +159,6 @@ export default function SchedulesPage({ role, userId }) {
         preview: `${result.changes.length} timetable change${result.changes.length === 1 ? "" : "s"} proposed. ${reason}`,
       };
       const approval = await createApproval(approvalData);
-      apiCreateApproval(approvalData).catch((err) =>
-        console.debug("API schedule approval fallback:", err.message)
-      );
 
       setProposal({ ...result, approvalId: approval.id, input: nextInput });
       window.dispatchEvent(new CustomEvent("instituteos-approvals-changed"));
@@ -176,12 +174,10 @@ export default function SchedulesPage({ role, userId }) {
       decision,
       payload: { grid: proposal.grid, changes: proposal.changes },
     });
-    apiDecideApproval(proposal.approvalId, decision === "approve" ? "approved" : "rejected").catch(() => {});
-
     if (decision === "approve") {
       sound.chime();
       setGrid(proposal.grid);
-      localStorage.setItem("instituteos_solved_schedule", JSON.stringify(proposal.grid));
+      localStorage.setItem(appStorageKey("instituteos_solved_schedule"), JSON.stringify(proposal.grid));
       setStatus("Approved timetable plan saved locally.");
       toast.success("Schedule Approved", "New clash-free timetable is now active across all rooms.");
 

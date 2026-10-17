@@ -1,5 +1,15 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { getRoleDatabase, resetLocalDatabase, runRoleQuery } from "./database.js";
+vi.mock("../services/supabase.js", async (importOriginal) => {
+  const actual = await importOriginal();
+  return {
+    ...actual,
+    supabaseEnabled: false,
+    fetchSupabaseSeed: async () => null,
+    insertSupabaseRow: vi.fn(),
+  };
+});
+import { addAuditEntry, getRoleDatabase, resetLocalDatabase, runRoleQuery } from "./database.js";
+import { insertSupabaseRow } from "../services/supabase.js";
 
 const values = new Map();
 
@@ -11,6 +21,7 @@ vi.stubGlobal("localStorage", {
 
 describe("role-scoped SQLite database", () => {
   beforeEach(async () => {
+    vi.clearAllMocks();
     values.clear();
     await resetLocalDatabase();
   });
@@ -42,5 +53,13 @@ describe("role-scoped SQLite database", () => {
     await resetLocalDatabase();
     const result = await runRoleQuery({ role: "owner", userId: "USR-OWNER", sql: "SELECT COUNT(*) AS student_count FROM students" });
     expect(Number(result.rows[0].student_count)).toBe(140);
+  });
+
+  it("keeps local audit records without sending direct Supabase inserts", async () => {
+    await addAuditEntry({ role: "owner", userId: "USR-OWNER", event: "test_event", detail: "local only" });
+    const db = await getRoleDatabase("owner", "USR-OWNER");
+    const rows = db.exec("SELECT event, detail FROM audit_log WHERE event = 'test_event'")[0].values;
+    expect(rows).toEqual([["test_event", "local only"]]);
+    expect(insertSupabaseRow).not.toHaveBeenCalledWith("audit_log", expect.anything());
   });
 });

@@ -1,0 +1,15 @@
+-- DECISION TEMPLATE ONLY. Do not execute without first reviewing the actual object and its owner.
+-- The InstituteOS migrations do not create, alter, or drop public.copilet.
+-- Option A: lock it down after confirming it is yours and application dependencies are understood.
+-- Uncomment only the minimum GRANT/REVOKE statements you deliberately choose.
+-- begin;
+-- revoke all on table public.copilet from anon, authenticated;
+-- alter table public.copilet enable row level security;
+-- (Add narrowly scoped policies only after an owner approves the exact intended access.)
+-- commit;
+--
+-- Option B: drop it only after confirming ownership, dependencies, backup, and explicit approval.
+-- This is intentionally commented out; never use CASCADE.
+-- begin;
+-- drop table public.copilet;
+-- commit;

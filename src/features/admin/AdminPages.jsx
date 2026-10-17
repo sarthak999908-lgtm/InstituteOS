@@ -1,10 +1,10 @@
 import { useEffect, useState } from "react";
 import { Download, FileText, Printer, RefreshCw, RotateCcw, ShieldCheck, Sun, Moon, Laptop, Palette, Feather, Database, Server, Activity, CheckCircle2, AlertCircle } from "lucide-react";
-import { users } from "../../data/mockData.js";
 import { listAuditLog, resetLocalDatabase, runRoleQuery } from "../../lib/database.js";
 import { useTheme } from "../../app/providers.jsx";
-import { getSystemStatus, getAuditLog } from "../../services/api.js";
+import { getSystemStatus, getAuditLog, requestAuditExport } from "../../services/api.js";
 import "./admin.css";
+import { appStorageKey } from "../../lib/localDemo.js";
 
 
 function PageHeading({ eyebrow, title, description, icon: Icon }) {
@@ -45,13 +45,13 @@ export function ReportsPage({ role, userId }) {
     </div>;
 }
 
-export function SettingsPage({ role, userId, userName, onRoleChange }) {
+export function SettingsPage({ role, userId, userName }) {
   const { theme, setTheme, accent, setAccent, calmMode, setCalmMode } = useTheme();
   const [audit, setAudit] = useState([]);
   const [query, setQuery] = useState("");
   const [roleFilter, setRoleFilter] = useState("All roles");
   const [eventFilter, setEventFilter] = useState("All events");
-  const [reducedMotion, setReducedMotion] = useState(() => localStorage.getItem("instituteos_reduced_motion") === "true");
+  const [reducedMotion, setReducedMotion] = useState(() => localStorage.getItem(appStorageKey("instituteos_reduced_motion")) === "true");
   const [status, setStatus] = useState("");
 
   const [systemDiag, setSystemDiag] = useState(null);
@@ -76,11 +76,13 @@ export function SettingsPage({ role, userId, userName, onRoleChange }) {
       if (Array.isArray(remote) && remote.length) {
         const formattedRemote = remote.map((r) => ({
           id: r.id,
-          at: r.ts || r.created_at,
-          role: r.actor_role || "system",
-          user_id: r.actor_id || "backend",
-          event: r.action,
-          detail: typeof r.details === "object" ? JSON.stringify(r.details) : String(r.details || ""),
+          at: r.at || r.ts || r.created_at,
+          role: r.role || r.actor_role || "system",
+          user_id: r.user_id || r.actor_id || "backend",
+          event: r.event || r.action,
+          detail: typeof (r.detail ?? r.details) === "object"
+            ? JSON.stringify(r.detail ?? r.details)
+            : String(r.detail ?? r.details ?? ""),
         }));
         setAudit([...formattedRemote, ...local]);
         return;
@@ -96,7 +98,7 @@ export function SettingsPage({ role, userId, userName, onRoleChange }) {
 
   useEffect(() => {
     document.documentElement.dataset.reducedMotion = String(reducedMotion);
-    localStorage.setItem("instituteos_reduced_motion", String(reducedMotion));
+    localStorage.setItem(appStorageKey("instituteos_reduced_motion"), String(reducedMotion));
   }, [reducedMotion]);
 
 
@@ -106,9 +108,22 @@ export function SettingsPage({ role, userId, userName, onRoleChange }) {
   });
   const events = ["All events", ...new Set(audit.map((entry) => entry.event))];
 
-  function exportCsv() {
+  async function exportCsv() {
+    let remoteCsv;
+    try {
+      remoteCsv = await requestAuditExport("audit_log", {
+        query: query.trim(),
+        role: roleFilter,
+        event: eventFilter,
+      });
+    } catch (error) {
+      setStatus(`Audit export stopped: ${error.message}`);
+      return;
+    }
     const quote = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
-    const body = [["at", "role", "user_id", "event", "detail"], ...filteredAudit.map((entry) => [entry.at, entry.role, entry.user_id, entry.event, entry.detail])].map((row) => row.map(quote).join(",")).join("\n");
+    const body = typeof remoteCsv === "string"
+      ? remoteCsv
+      : [["at", "role", "user_id", "event", "detail"], ...filteredAudit.map((entry) => [entry.at, entry.role, entry.user_id, entry.event, entry.detail])].map((row) => row.map(quote).join(",")).join("\n");
     const url = URL.createObjectURL(new Blob([body], { type: "text/csv;charset=utf-8" }));
     const link = document.createElement("a");
     link.href = url;
@@ -120,7 +135,7 @@ export function SettingsPage({ role, userId, userName, onRoleChange }) {
   async function resetData() {
     if (!window.confirm("Reset all local demo records and reseed the institute database?")) return;
     await resetLocalDatabase();
-    for (const key of ["instituteos_students", "instituteos_batches", "instituteos_attendance", "instituteos_fees", "instituteos_schedules", "instituteos_payments"]) localStorage.removeItem(key);
+    for (const key of ["instituteos_students", "instituteos_batches", "instituteos_attendance", "instituteos_fees", "instituteos_schedules", "instituteos_payments"]) localStorage.removeItem(appStorageKey(key));
     setAudit([]);
     setStatus("Local demo data has been reseeded.");
   }
@@ -179,8 +194,8 @@ export function SettingsPage({ role, userId, userName, onRoleChange }) {
             <Database size={15} color="#0D9488" />
             <strong style={{ fontSize: "13px", color: "var(--text-primary)" }}>Supabase Connection</strong>
           </div>
-          <span style={{ fontSize: "12px", color: systemDiag?.data?.supabase?.connected || systemDiag?.supabase?.connected ? "#16A34A" : "var(--text-muted)" }}>
-            {(systemDiag?.data?.supabase?.connected || systemDiag?.supabase?.connected) ? "PostgreSQL Live" : "Local Demo Fallback"}
+          <span style={{ fontSize: "12px", color: systemDiag?.data?.supabase?.configured || systemDiag?.supabase?.configured ? "#16A34A" : "var(--text-muted)" }}>
+            {(systemDiag?.data?.supabase?.configured || systemDiag?.supabase?.configured) ? "Supabase configured" : "Supabase not configured"}
           </span>
         </div>
 
@@ -292,9 +307,9 @@ export function SettingsPage({ role, userId, userName, onRoleChange }) {
       </div>
     </section>
 
-    <section className="panel settings-section"><div className="record-toolbar"><div><h2>Users and roles</h2><p>Role switching is a local demo feature. Data access is rebuilt from the selected role schema.</p></div></div><div className="role-directory">{users.map((user) => <article key={user.id} className={`role-user ${role === user.role ? "selected" : ""}`}><div className="avatar">{user.name.split(" ").map((part) => part[0]).join("")}</div><div><strong>{user.name}</strong><small>{user.email}</small></div><span className="record-badge">{user.role}</span><button className="student-secondary-button" type="button" disabled={user.role === role} onClick={() => onRoleChange(user.role)}>Switch role</button></article>)}</div><p className="current-user-line">Signed in as {userName} · {role} · {userId}</p></section>
+    <section className="panel settings-section"><div className="record-toolbar"><div><h2>Access role</h2><p>Role assignments are managed in Supabase Auth metadata. Roles cannot be changed from this workspace.</p></div></div><p className="current-user-line">Signed in as {userName} · {role} · {userId}</p></section>
     <section className="panel settings-section"><div className="record-toolbar"><div><h2>Accessibility</h2><p>Reduce non-essential animation across the workspace.</p></div><label className="motion-toggle"><input type="checkbox" checked={reducedMotion} onChange={(event) => setReducedMotion(event.target.checked)} /><span>Reduced motion</span></label></div></section>
-    <section className="panel settings-section"><div className="record-toolbar"><div><h2>Audit log</h2><p>Copilot queries, permission refusals, previews, and approval decisions.</p></div><div className="record-toolbar-controls"><button className="student-secondary-button" type="button" onClick={refreshAudit}><RefreshCw size={14} />Refresh</button><button className="student-secondary-button" type="button" onClick={exportCsv}><Download size={14} />Export CSV</button></div></div><div className="audit-filters"><input className="audit-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search audit entries" aria-label="Search audit log" /><select className="record-filter" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)} aria-label="Filter audit role"><option>All roles</option>{users.map((user) => <option key={user.role}>{user.role}</option>)}</select><select className="record-filter" value={eventFilter} onChange={(event) => setEventFilter(event.target.value)} aria-label="Filter audit event">{events.map((event) => <option key={event}>{event}</option>)}</select></div><div className="record-table-wrap"><table className="record-table"><thead><tr><th>Time</th><th>Role</th><th>Event</th><th>Detail</th></tr></thead><tbody>{filteredAudit.length ? filteredAudit.map((entry) => <tr key={entry.id}><td>{new Date(entry.at).toLocaleString()}</td><td>{entry.role}</td><td>{entry.event}</td><td className="audit-detail">{entry.detail}</td></tr>) : <tr><td colSpan="4" className="record-empty">No audit events match these filters.</td></tr>}</tbody></table></div></section>
+    <section className="panel settings-section"><div className="record-toolbar"><div><h2>Audit log</h2><p>Server audit entries appear alongside this browser's local demo entries.</p></div><div className="record-toolbar-controls"><button className="student-secondary-button" type="button" onClick={refreshAudit}><RefreshCw size={14} />Refresh</button><button className="student-secondary-button" type="button" onClick={exportCsv}><Download size={14} />Export CSV</button></div></div><div className="audit-filters"><input className="audit-search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search audit entries" aria-label="Search audit log" /><select className="record-filter" value={roleFilter} onChange={(event) => setRoleFilter(event.target.value)} aria-label="Filter audit role"><option>All roles</option>{["owner", "counselor", "trainer", "accounts"].map((value) => <option key={value}>{value}</option>)}</select><select className="record-filter" value={eventFilter} onChange={(event) => setEventFilter(event.target.value)} aria-label="Filter audit event">{events.map((event) => <option key={event}>{event}</option>)}</select></div><div className="record-table-wrap"><table className="record-table"><thead><tr><th>Time</th><th>Role</th><th>Event</th><th>Detail</th></tr></thead><tbody>{filteredAudit.length ? filteredAudit.map((entry) => <tr key={entry.id}><td>{new Date(entry.at).toLocaleString()}</td><td>{entry.role}</td><td>{entry.event}</td><td className="audit-detail">{entry.detail}</td></tr>) : <tr><td colSpan="4" className="record-empty">No audit events match these filters.</td></tr>}</tbody></table></div></section>
     <section className="panel settings-section danger-zone"><div><h2>Local demo data</h2><p>Reset the browser database to its deterministic seeded state.</p></div><button className="student-secondary-button" type="button" onClick={resetData}><RotateCcw size={15} />Reset and reseed</button>{status && <span role="status">{status}</span>}</section>
   </div>;
 }

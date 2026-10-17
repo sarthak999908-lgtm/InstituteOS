@@ -2,11 +2,11 @@ import { useEffect, useRef, useState, useMemo } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Bot, Check, Clipboard, Clock3, LockKeyhole, Plus, Send,
-  Sparkles, X, ChevronDown, ArrowDown, ShieldCheck, AlertCircle
+  Sparkles, X, ChevronDown, ArrowDown, ShieldCheck, AlertCircle, ThumbsUp, ThumbsDown, Square
 } from "lucide-react";
 import { decideApproval, listApprovals } from "../../lib/database.js";
 import { runCopilotMessage } from "../../services/copilot.js";
-import { queryCopilotBackend, decideApproval as apiDecideApproval } from "../../services/api.js";
+import { submitCopilotFeedback } from "../../services/api.js";
 
 import GlassCard from "../../components/common/GlassCard.jsx";
 import MagneticButton from "../../components/common/MagneticButton.jsx";
@@ -15,6 +15,7 @@ import HoldToConfirm from "../../components/common/HoldToConfirm.jsx";
 import { sound } from "../../lib/sound.js";
 import { staggerContainer, staggerItem } from "../../lib/motion.js";
 import "./copilot.css";
+import { appStorageKey } from "../../lib/localDemo.js";
 
 const suggestions = [
   "Which students in the Java batch have missed three or more classes and have an EMI due this week? Draft a WhatsApp reminder for each.",
@@ -29,7 +30,7 @@ function historyKey(userId) {
 
 function readHistory(userId) {
   try {
-    const history = JSON.parse(localStorage.getItem(historyKey(userId)) || "[]");
+    const history = JSON.parse(localStorage.getItem(appStorageKey(historyKey(userId))) || "[]");
     return Array.isArray(history) ? history : [];
   } catch {
     return [];
@@ -216,7 +217,7 @@ function QueryResult({ result, onPrompt, role, userId }) {
                   transition: "transform 0.2s",
                 }}
               />
-              <span style={{ fontWeight: 600, color: "#ffffff" }}>Executed SQLite Query</span>
+              <span style={{ fontWeight: 600, color: "#ffffff" }}>Read-only SQL Query</span>
             </div>
 
             <button
@@ -319,8 +320,9 @@ function ActionPreview({ preview, role, userId }) {
   const [status, setStatus] = useState("pending");
   const canApprove =
     role === "owner" ||
-    (role === "accounts" && ["fee_reconciliation", "fee_action"].includes(preview.kind));
+    (role === "accounts" && ["fee_reconciliation", "fee_action", "send_receipts", "extend_due_date"].includes(preview.kind));
   const [working, setWorking] = useState(false);
+  const [decisionError, setDecisionError] = useState("");
 
   async function decide(decision) {
     setWorking(true);
@@ -332,14 +334,16 @@ function ActionPreview({ preview, role, userId }) {
         decision,
         payload: recipients,
       });
-      apiDecideApproval(preview.approvalId, decision === "approve" ? "approved" : "rejected").catch(() => {});
       setStatus(decision === "approve" ? "approved" : "rejected");
       window.dispatchEvent(new CustomEvent("instituteos-approvals-changed"));
-      if (decision === "approve") {
+      if (decision === "approve" && preview.kind === "whatsapp_reminders") {
         window.dispatchEvent(
           new CustomEvent("instituteos-send-list", { detail: recipients })
         );
       }
+      setDecisionError("");
+    } catch {
+      setDecisionError("The decision could not be saved. Please retry.");
     } finally {
       setWorking(false);
     }
@@ -426,7 +430,7 @@ function ActionPreview({ preview, role, userId }) {
         ))}
       </div>
 
-      {status === "pending" && (
+      {status === "pending" && canApprove && (
         <div style={{ display: "flex", justifyContent: "flex-end", gap: 10, alignItems: "center" }}>
           <MagneticButton
             variant="secondary"
@@ -436,24 +440,20 @@ function ActionPreview({ preview, role, userId }) {
             Reject
           </MagneticButton>
 
-          {canApprove ? (
-            <HoldToConfirm
-              onConfirm={() => decide("approve")}
-              label="Hold to Approve"
-              confirmedLabel="Approved!"
-              disabled={working}
-            />
-          ) : (
-            <MagneticButton
-              variant="primary"
-              disabled={working}
-              onClick={() => decide("approve")}
-            >
-              Request Approval
-            </MagneticButton>
-          )}
+          <HoldToConfirm
+            onConfirm={() => decide("approve")}
+            label="Hold to Approve"
+            confirmedLabel="Approved!"
+            disabled={working}
+          />
         </div>
       )}
+      {status === "pending" && !canApprove && (
+        <p role="status" style={{ margin: 0, color: "var(--text-muted)", fontSize: 12 }}>
+          Pending review by an authorized approver.
+        </p>
+      )}
+      {decisionError && <p role="alert" style={{ margin: "8px 0 0", color: "var(--red)", fontSize: 12 }}>{decisionError}</p>}
     </motion.section>
   );
 }
@@ -560,6 +560,7 @@ export default function CopilotPage({ role, userId }) {
   const [question, setQuestion] = useState("");
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState("");
+  const [streamingAnswer, setStreamingAnswer] = useState("");
   const [orbState, setOrbState] = useState("idle"); // idle, listening, thinking, success, refused
   const [context, setContext] = useState({});
   const [approvals, setApprovals] = useState([]);
@@ -569,6 +570,7 @@ export default function CopilotPage({ role, userId }) {
   const textareaRef = useRef(null);
   const chatScrollRef = useRef(null);
   const bottomRef = useRef(null);
+  const abortRef = useRef(null);
 
   useEffect(() => {
     setMessages(readHistory(userId));
@@ -577,7 +579,7 @@ export default function CopilotPage({ role, userId }) {
 
   useEffect(() => {
     try {
-      localStorage.setItem(historyKey(userId), JSON.stringify(messages));
+      localStorage.setItem(appStorageKey(historyKey(userId)), JSON.stringify(messages));
     } catch (e) {
       console.error(e);
     }
@@ -645,20 +647,21 @@ export default function CopilotPage({ role, userId }) {
     setQuestion("");
     setBusy(true);
     setOrbState("thinking");
-
-    // Stage labels cycle: Understanding -> Writing query -> Checking permissions -> Running -> Summarising
-    const stages = ["Understanding", "Writing query", "Checking permissions", "Running query", "Summarising"];
-    let stageIdx = 0;
-    setStage(stages[0]);
-
-    const stageInterval = setInterval(() => {
-      stageIdx = (stageIdx + 1) % stages.length;
-      setStage(stages[stageIdx]);
-    }, 450);
+    setStreamingAnswer("");
+    setStage("Understanding");
+    const controller = new AbortController();
+    abortRef.current = controller;
 
     try {
-      const result = await runCopilotMessage({ question: text, role, userId, context });
-      clearInterval(stageInterval);
+      const result = await runCopilotMessage({
+        question: text,
+        role,
+        userId,
+        context,
+        signal: controller.signal,
+        onStage: setStage,
+        onText: (chunk, replace = false) => setStreamingAnswer((current) => replace ? chunk : current + chunk),
+      });
 
       if (result.refusal) {
         setOrbState("refused");
@@ -669,26 +672,42 @@ export default function CopilotPage({ role, userId }) {
       }
 
       setMessages((current) => [...current, { role: "assistant", text: result.answer, result }]);
+      setStreamingAnswer("");
       if (result.context) setContext(result.context);
       await refreshApprovals();
-
-      // Mirror query audit to backend remote logging pipeline
-      queryCopilotBackend(text, result?.intent || "copilot_query").catch(() => {});
-
       setTimeout(() => setOrbState("idle"), 2400);
 
     } catch (error) {
-      clearInterval(stageInterval);
+      setStreamingAnswer("");
+      if (error.name === "AbortError") {
+        setMessages((current) => [...current, { role: "assistant", text: "Generation stopped by you.", result: { mode: "local" } }]);
+        return;
+      }
       setOrbState("refused");
       sound.error();
       setMessages((current) => [
         ...current,
-        { role: "assistant", text: `I couldn't complete that request: ${error.message}` },
+        { role: "assistant", text: `I couldn't complete that request: ${error.message}`, result: { retryQuestion: text } },
       ]);
       setTimeout(() => setOrbState("idle"), 2400);
     } finally {
+      abortRef.current = null;
       setBusy(false);
       setStage("");
+    }
+  }
+
+  async function rateAnswer(answerId, feedback) {
+    if (!answerId) return;
+    try {
+      await submitCopilotFeedback(answerId, feedback);
+      setMessages((current) => current.map((message) => message.result?.answerId === answerId
+        ? { ...message, result: { ...message.result, feedback } }
+        : message));
+    } catch {
+      setMessages((current) => current.map((message) => message.result?.answerId === answerId
+        ? { ...message, result: { ...message.result, feedbackError: true } }
+        : message));
     }
   }
 
@@ -696,7 +715,7 @@ export default function CopilotPage({ role, userId }) {
     sound.tick();
     setMessages([]);
     setContext({});
-    localStorage.removeItem(historyKey(userId));
+    localStorage.removeItem(appStorageKey(historyKey(userId)));
   }
 
   return (
@@ -759,7 +778,7 @@ export default function CopilotPage({ role, userId }) {
                 Ask your institute
               </h1>
               <p style={{ fontSize: "12px", color: "var(--text-secondary)", margin: 0 }}>
-                Role-scoped SQLite answers, visible SQL syntax, and approval-first ceremonies.
+                Role-scoped read-only answers, visible SQL, and approval-first actions.
               </p>
             </div>
           </div>
@@ -920,6 +939,39 @@ export default function CopilotPage({ role, userId }) {
                     {message.text}
                   </p>
 
+                  {!isUser && message.result?.retryQuestion && (
+                    <button type="button" onClick={() => send(message.result.retryQuestion)} disabled={busy} style={{ marginTop: 8, border: "1px solid var(--border)", borderRadius: 6, padding: "5px 9px", color: "var(--cyan)", background: "transparent", cursor: busy ? "default" : "pointer" }}>
+                      Retry question
+                    </button>
+                  )}
+
+                  {!isUser && message.result?.mode && (
+                    <div style={{ display: "flex", alignItems: "center", gap: 8, marginTop: 8, flexWrap: "wrap" }}>
+                      <span style={{ borderRadius: 12, padding: "2px 8px", fontSize: 10, fontWeight: 700, color: message.result.mode === "ai" ? "#a5f3fc" : "#fde68a", background: message.result.mode === "ai" ? "rgba(34,211,238,.12)" : "rgba(251,191,36,.12)" }}>
+                        {message.result.mode === "ai" ? "AI" : "Local"}
+                      </span>
+                      {message.result.dataMode && message.result.dataMode !== "none" && (
+                        <span style={{ fontSize: 10, color: "var(--text-muted)" }}>
+                          {message.result.dataMode === "live" ? "Live RLS data" : "Local data"}
+                        </span>
+                      )}
+                      {message.result.unavailableReason && (
+                        <span role="status" style={{ color: "#fbbf24", fontSize: 11 }}>AI unavailable; answered with the local planner.</span>
+                      )}
+                    </div>
+                  )}
+
+                  {!isUser && message.result?.answerId && (
+                    <div style={{ display: "flex", gap: 6, marginTop: 8 }} aria-label="Rate this answer">
+                      {[["up", ThumbsUp], ["down", ThumbsDown]].map(([value, Icon]) => (
+                        <button key={value} type="button" aria-label={value === "up" ? "Helpful answer" : "Not helpful"} aria-pressed={message.result.feedback === value} onClick={() => rateAnswer(message.result.answerId, value)} style={{ display: "inline-flex", alignItems: "center", gap: 4, color: message.result.feedback === value ? "var(--cyan)" : "var(--text-muted)", background: "transparent", border: "1px solid var(--border)", borderRadius: 6, padding: "4px 7px", cursor: "pointer" }}>
+                          <Icon size={13} />
+                        </button>
+                      ))}
+                      {message.result.feedbackError && <span role="status" style={{ fontSize: 10, color: "var(--text-muted)" }}>Feedback could not be saved.</span>}
+                    </div>
+                  )}
+
                   {message.result && (
                     <QueryResult
                       result={message.result}
@@ -955,8 +1007,9 @@ export default function CopilotPage({ role, userId }) {
                   {stage || "Running query"}...
                 </strong>
                 <small style={{ fontSize: "11px", color: "var(--text-muted)" }}>
-                  Executing role-scoped policies in WebAssembly SQLite
+                  Using verified role and institute scope
                 </small>
+                {streamingAnswer && <p style={{ color: "#f4f5ff", fontSize: 12, lineHeight: 1.45, margin: "8px 0 0" }}>{streamingAnswer}</p>}
               </div>
             </motion.div>
           )}
@@ -1045,15 +1098,15 @@ export default function CopilotPage({ role, userId }) {
             }}
           />
 
-          <MagneticButton
-            type="submit"
-            variant="primary"
-            disabled={!question.trim() || busy}
-            style={{ padding: "8px 16px", borderRadius: "var(--radius-sm)" }}
-          >
-            <Send size={15} />
-            Send
-          </MagneticButton>
+          {busy ? (
+            <MagneticButton type="button" variant="secondary" onClick={() => abortRef.current?.abort()} style={{ padding: "8px 16px", borderRadius: "var(--radius-sm)" }}>
+              <Square size={14} /> Stop
+            </MagneticButton>
+          ) : (
+            <MagneticButton type="submit" variant="primary" disabled={!question.trim()} style={{ padding: "8px 16px", borderRadius: "var(--radius-sm)" }}>
+              <Send size={15} /> Send
+            </MagneticButton>
+          )}
         </form>
       </GlassCard>
 

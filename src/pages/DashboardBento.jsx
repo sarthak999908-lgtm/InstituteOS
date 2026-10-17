@@ -1,4 +1,4 @@
-import { useState, useMemo, useRef } from "react";
+import { useMemo, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
   Users, BookOpen, ClipboardCheck, Wallet, Sparkles, RefreshCw,
@@ -8,10 +8,6 @@ import {
 import GlassCard from "../components/common/GlassCard.jsx";
 import MagneticButton from "../components/common/MagneticButton.jsx";
 import CountUp from "../components/common/CountUp.jsx";
-import Sparkline from "../components/common/Sparkline.jsx";
-import { sound } from "../lib/sound.js";
-import { INITIAL_STUDENTS } from "../data.js";
-import { batches } from "../data/mockData.js";
 
 export default function DashboardBento({
   dashboard,
@@ -22,49 +18,15 @@ export default function DashboardBento({
   onNavigate,
   onSelectStudent,
   role = "owner",
+  localDemoMode = false,
 }) {
-  const stats = useMemo(() => getStatsData(dashboard), [dashboard]);
+  const stats = useMemo(() => getStatsData(dashboard, role), [dashboard, role]);
 
   // Cash flow monthly trend data for the River chart
-  const cashFlowData = [
-    { month: "May", collected: 140000, projected: 160000 },
-    { month: "Jun", collected: 185000, projected: 190000 },
-    { month: "Jul", collected: 210000, projected: 220000 },
-    { month: "Aug", collected: 195000, projected: 240000 },
-    { month: "Sep", collected: 260000, projected: 280000 },
-    { month: "Oct", collected: 290000, projected: 310000 },
-  ];
+  const cashFlowData = dashboard?.cashFlowData || [];
 
   // Attention Feed Alerts
-  const alerts = [
-    {
-      id: "alt-1",
-      severity: "high", // red
-      title: "Critical Attendance & Fee Risk",
-      description: "Pooja Verma & Rahul Sharma missed 3+ classes with overdue EMIs.",
-      actionLabel: "Ask Copilot",
-      action: () => onNavigate("AI Copilot"),
-      time: "10m ago",
-    },
-    {
-      id: "alt-2",
-      severity: "medium", // amber
-      title: "Room 4 Capacity at 94%",
-      description: "Data Science Evening batch has 28 learners in a 30-seat room.",
-      actionLabel: "View Batches",
-      action: () => onNavigate("Batches"),
-      time: "1h ago",
-    },
-    {
-      id: "alt-3",
-      severity: "low", // green
-      title: "Clash-Free Timetable Generated",
-      description: "Weekly solver produced optimal room-trainer allocation.",
-      actionLabel: "Open Schedules",
-      action: () => onNavigate("Schedules"),
-      time: "2h ago",
-    },
-  ];
+  const alerts = Array.isArray(dashboard?.alerts) ? dashboard.alerts : [];
 
   return (
     <div className="dashboard-bento-container" style={{ display: "flex", flexDirection: "column", gap: 20 }}>
@@ -116,7 +78,7 @@ export default function DashboardBento({
           </h1>
 
           <p style={{ margin: "4px 0 0", fontSize: "14px", color: "var(--text-secondary)" }}>
-            Real-time institute telemetry, risk constellations and financial trajectory.
+            {localDemoMode ? "Fictional sample metrics in a browser-only demo." : "Live institute metrics and operational views."}
           </p>
         </div>
 
@@ -141,7 +103,7 @@ export default function DashboardBento({
           gap: 16,
         }}
       >
-        {stats.map((stat, idx) => (
+        {stats.length ? stats.map((stat) => (
           <GlassCard
             key={stat.label}
             style={{
@@ -195,10 +157,9 @@ export default function DashboardBento({
               <span style={{ fontSize: "12px", color: "var(--text-secondary)" }}>
                 {stat.note}
               </span>
-              <Sparkline data={stat.sparkline} color={stat.color} fillGradientId={`spark-${idx}`} width={88} height={26} />
             </div>
           </GlassCard>
-        ))}
+        )) : <p role="status">Live dashboard metrics are unavailable.</p>}
       </section>
 
       {/* Main Bento Asymmetric Section */}
@@ -210,7 +171,7 @@ export default function DashboardBento({
         }}
       >
         {/* Left 7 Columns: Cash Flow River + Risk Constellation */}
-        <div style={{ gridColumn: "span 7", display: "flex", flexDirection: "column", gap: 18 }} className="bento-col-7">
+        {(["owner", "accounts"].includes(role)) && <div style={{ gridColumn: "span 7", display: "flex", flexDirection: "column", gap: 18 }} className="bento-col-7">
           {/* Cash Flow River Chart Tile */}
           <GlassCard style={{ padding: 22, position: "relative" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18 }}>
@@ -237,8 +198,7 @@ export default function DashboardBento({
               </span>
             </div>
 
-            {/* SVG Interactive River Area Chart with Highlight Dot */}
-            <CashFlowRiverSvg data={cashFlowData} />
+            {cashFlowData.length ? <CashFlowRiverSvg data={cashFlowData} /> : <p role="status">Financial trend data is not connected yet.</p>}
 
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginTop: 14, paddingTop: 12, borderTop: "1px solid var(--border)", fontSize: "12px" }}>
               <div style={{ display: "flex", gap: 16 }}>
@@ -282,7 +242,7 @@ export default function DashboardBento({
                   Risk Constellation
                 </h3>
                 <p style={{ fontSize: "12px", color: "var(--text-secondary)", margin: 0 }}>
-                  Nodes sized by academic/fee risk, linked by cohort. Click any node to open the student drawer.
+                Risk flags are not connected to live attendance, assignment, or payment data yet.
                 </p>
               </div>
               <span
@@ -299,12 +259,12 @@ export default function DashboardBento({
               </span>
             </div>
 
-            <RiskConstellation onSelectStudent={onSelectStudent} />
+            <p role="status">No live student risk flags are available.</p>
           </GlassCard>
-        </div>
+        </div>}
 
         {/* Right 5 Columns: Radial Attendance Gauge + Attention Feed */}
-        <div style={{ gridColumn: "span 5", display: "flex", flexDirection: "column", gap: 18 }} className="bento-col-5">
+        <div style={{ gridColumn: ["owner", "accounts"].includes(role) ? "span 5" : "span 12", display: "flex", flexDirection: "column", gap: 18 }} className="bento-col-5">
           {/* Radial Attendance Gauge Tile */}
           <GlassCard style={{ padding: 22, textAlign: "center" }}>
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
@@ -314,7 +274,9 @@ export default function DashboardBento({
               <Activity size={16} color="var(--success)" />
             </div>
 
-            <RadialAttendanceGauge percentage={86} />
+            {Number.isFinite(Number(dashboard?.attendancePercentage))
+              ? <RadialAttendanceGauge percentage={Number(dashboard.attendancePercentage)} />
+              : <p role="status">Live attendance metrics are not available.</p>}
 
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, marginTop: 14 }}>
               <div style={{ padding: "8px 10px", background: "var(--surface-2)", borderRadius: 8, border: "1px solid var(--border)" }}>
@@ -363,12 +325,12 @@ export default function DashboardBento({
                 </h3>
               </div>
               <span style={{ fontSize: "11px", color: "var(--accent-primary)", fontWeight: 600 }}>
-                3 Alerts
+                {alerts.length} Alerts
               </span>
             </div>
 
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              {alerts.map((item) => {
+              {alerts.length ? alerts.map((item) => {
                 const dotAnim =
                   item.severity === "high"
                     ? "pulse-dot-red"
@@ -438,7 +400,7 @@ export default function DashboardBento({
                     </div>
                   </div>
                 );
-              })}
+              }) : <p role="status">No live operational alerts are available.</p>}
             </div>
           </GlassCard>
         </div>
@@ -630,205 +592,21 @@ function CashFlowRiverSvg({ data }) {
 }
 
 // -------------------------------------------------------------
-// Subcomponent: Risk Constellation (Ocean/Teal/Coral palette)
-// -------------------------------------------------------------
-function RiskConstellation({ onSelectStudent }) {
-  const [hoveredNode, setHoveredNode] = useState(null);
-
-  const constellationNodes = [
-    { id: "STU-1", name: "Pooja Verma", batch: "Full Stack Morning", risk: 85, x: 75, y: 48, reason: "3 missed sessions · EMI overdue" },
-    { id: "STU-2", name: "Rahul Sharma", batch: "Full Stack Morning", risk: 78, x: 165, y: 68, reason: "Attendance at 62% · EMI pending" },
-    { id: "STU-3", name: "Ananya Iyer", batch: "Full Stack Morning", risk: 20, x: 115, y: 115, reason: "Stable · 95% attendance" },
-    { id: "STU-4", name: "Vikram Das", batch: "Data Science Evening", risk: 65, x: 255, y: 52, reason: "2 missed sessions · fee due" },
-    { id: "STU-5", name: "Sneha Reddy", batch: "Data Science Evening", risk: 30, x: 335, y: 85, reason: "Stable · 88% attendance" },
-    { id: "STU-6", name: "Aditya Roy", batch: "Data Science Evening", risk: 15, x: 275, y: 125, reason: "Stable · Top test score" },
-    { id: "STU-7", name: "Karan Malhotra", batch: "Product Design Weekend", risk: 72, x: 415, y: 38, reason: "Missed 3 workshops" },
-    { id: "STU-8", name: "Neha Joshi", batch: "Product Design Weekend", risk: 25, x: 455, y: 105, reason: "Stable · 90% attendance" },
-  ];
-
-  const links = [
-    [0, 1], [1, 2], [0, 2],
-    [3, 4], [4, 5], [3, 5],
-    [6, 7],
-    [1, 3],
-  ];
-
-  return (
-    <div style={{ position: "relative", width: "100%", height: 160, overflow: "visible" }}>
-      <svg viewBox="0 0 520 155" style={{ width: "100%", height: "100%", overflow: "visible" }}>
-        {/* Constellation link lines */}
-        {links.map(([fromIdx, toIdx], i) => {
-          const from = constellationNodes[fromIdx];
-          const to = constellationNodes[toIdx];
-          return (
-            <line
-              key={i}
-              x1={from.x}
-              y1={from.y}
-              x2={to.x}
-              y2={to.y}
-              stroke="var(--border-strong)"
-              strokeWidth="1.2"
-              strokeDasharray="3 3"
-            />
-          );
-        })}
-
-        {/* Nodes */}
-        {constellationNodes.map((node) => {
-          const isHigh = node.risk > 60;
-          const radius = isHigh ? 7 : 5;
-          const nodeColor = isHigh ? "var(--danger)" : node.risk > 35 ? "var(--warning)" : "var(--accent-secondary)";
-
-          return (
-            <g
-              key={node.id}
-              style={{ cursor: "pointer" }}
-              onMouseEnter={() => {
-                sound.tick(1600, 0.015);
-                setHoveredNode(node);
-              }}
-              onMouseLeave={() => setHoveredNode(null)}
-              onClick={() => onSelectStudent && onSelectStudent(node)}
-            >
-              {isHigh && (
-                <circle
-                  cx={node.x}
-                  cy={node.y}
-                  r={radius + 5}
-                  fill="none"
-                  stroke={nodeColor}
-                  strokeWidth="1.5"
-                  opacity="0.6"
-                  style={{ animation: "pulse-dot-red 2s infinite" }}
-                />
-              )}
-
-              <circle
-                cx={node.x}
-                cy={node.y}
-                r={radius}
-                fill={nodeColor}
-                stroke="var(--surface)"
-                strokeWidth="1.5"
-                style={{ filter: `drop-shadow(0 1px 3px ${nodeColor}66)` }}
-              />
-            </g>
-          );
-        })}
-      </svg>
-
-      {/* Floating Hover Tooltip */}
-      <AnimatePresence>
-        {hoveredNode && (
-          <motion.div
-            initial={{ opacity: 0, y: 3, scale: 0.96 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 2, scale: 0.96 }}
-            style={{
-              position: "absolute",
-              top: Math.max(0, hoveredNode.y - 60),
-              left: Math.min(380, Math.max(10, hoveredNode.x - 85)),
-              background: "var(--surface)",
-              border: `1px solid ${hoveredNode.risk > 60 ? "rgba(220, 38, 38, 0.4)" : "var(--border)"}`,
-              borderRadius: "var(--radius-sm)",
-              padding: "8px 12px",
-              boxShadow: "var(--shadow-popover)",
-              pointerEvents: "none",
-              zIndex: 30,
-            }}
-          >
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <strong style={{ fontSize: "12px", color: "var(--text-primary)" }}>{hoveredNode.name}</strong>
-              <span
-                style={{
-                  fontSize: "9px",
-                  fontWeight: 700,
-                  color: hoveredNode.risk > 60 ? "var(--danger)" : "var(--success)",
-                  background: hoveredNode.risk > 60 ? "var(--danger-bg)" : "var(--success-bg)",
-                  padding: "1px 5px",
-                  borderRadius: 4,
-                }}
-              >
-                {hoveredNode.risk}% Risk
-              </span>
-            </div>
-            <div style={{ fontSize: "11px", color: "var(--text-secondary)", marginTop: 2 }}>
-              {hoveredNode.batch}
-            </div>
-            <div style={{ fontSize: "10px", color: "var(--accent-primary)", marginTop: 3 }}>
-              {hoveredNode.reason} · Click to inspect
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
-  );
-}
-
-// -------------------------------------------------------------
 // Helpers
 // -------------------------------------------------------------
-function getStatsData(dashboard) {
-  const localStudents = readLocalList("instituteos_students", INITIAL_STUDENTS);
-  const localBatches = readLocalList("instituteos_batches", batches);
-
-  return [
-    {
-      label: "Total Students",
-      value: localStudents.length,
-      prefix: "",
-      suffix: "",
-      icon: Users,
-      color: "var(--accent-primary)",
-      bg: "var(--accent-badge-bg)",
-      note: "+12% this month",
-      sparkline: [28, 32, 35, 38, 42, 45, 48, 52],
-    },
-    {
-      label: "Active Batches",
-      value: localBatches.length || 8,
-      prefix: "",
-      suffix: "",
-      icon: BookOpen,
-      color: "var(--accent-secondary)",
-      bg: "rgba(13, 148, 136, 0.12)",
-      note: "88% room capacity",
-      sparkline: [5, 6, 6, 7, 7, 8, 8, 8],
-    },
-    {
-      label: "Attendance Rate",
-      value: 86,
-      prefix: "",
-      suffix: "%",
-      icon: ClipboardCheck,
-      color: "var(--success)",
-      bg: "var(--success-bg)",
-      note: "Daily marked register",
-      sparkline: [80, 82, 85, 83, 86, 84, 88, 86],
-    },
-    {
-      label: "Pending Fees",
-      value: 64000,
-      prefix: "₹",
-      suffix: "",
-      formatter: (v) => `₹${Math.round(v).toLocaleString("en-IN")}`,
-      icon: Wallet,
-      color: "var(--warning)",
-      bg: "var(--warning-bg)",
-      note: "4 overdue instalments",
-      sparkline: [85000, 78000, 72000, 68000, 64000],
-    },
+function getStatsData(dashboard, role) {
+  const definitions = [
+    ["totalStudents", "Total Students", "", Users, "var(--accent-primary)", "var(--accent-badge-bg)"],
+    ["activeBatches", "Active Batches", "", BookOpen, "var(--accent-secondary)", "rgba(13, 148, 136, 0.12)"],
+    ["attendancePercentage", "Attendance Rate", "%", ClipboardCheck, "var(--success)", "var(--success-bg)"],
+    ...(role === "owner" || role === "accounts" ? [["pendingFees", "Pending Fees", "₹", Wallet, "var(--warning)", "var(--warning-bg)"]] : []),
   ];
-}
-
-function readLocalList(key, fallback = []) {
-  try {
-    const val = JSON.parse(localStorage.getItem(key) || "null");
-    return Array.isArray(val) ? val : fallback;
-  } catch {
-    return fallback;
-  }
+  return definitions.flatMap(([key, label, prefix, icon, color, bg]) => {
+    const value = dashboard?.[key];
+    if (!Number.isFinite(Number(value))) return [];
+    const note = dashboard?.source === "fictional-local-demo" ? "Fictional local sample" : "Live Supabase data";
+    return [{ label, value: Number(value), prefix, icon, color, bg, note }];
+  });
 }
 
 function getGreeting() {

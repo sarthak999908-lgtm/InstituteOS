@@ -1,11 +1,13 @@
 import initSqlJs from "sql.js";
 import wasmUrl from "sql.js/dist/sql-wasm.wasm?url";
-import { dataSeed } from "../data/mockData.js";
+import { dataSeed, trainerIdByUserId } from "../data/mockData.js";
 import { getFullSchema, getPolicy } from "./policy.js";
 import { guardSql } from "./sqlGuard.js";
-import { fetchSupabaseSeed, insertSupabaseRow, supabaseEnabled, updateSupabaseApproval } from "../services/supabase.js";
+import { appStorageKey } from "./localDemo.js";
+import { fetchSupabaseSeed, getAuthenticatedInstituteContext, supabaseEnabled } from "../services/supabase.js";
+import { createApproval as createRemoteApproval, decideApproval as decideRemoteApproval } from "../services/api.js";
 
-const STORAGE_KEY = "instituteos_sqlite_v1";
+const STORAGE_KEY = appStorageKey("instituteos_sqlite_v1");
 const numberColumns = new Set([
   "fee_total", "duration_weeks", "weekly_hours_max", "weekday", "capacity",
   "online_seat_limit", "student_count", "score", "duration_min", "total",
@@ -120,8 +122,8 @@ async function getMaster() {
 
 function filterRowsForRole(role, userId, table, rows, seed) {
   if (role !== "trainer") return rows;
-  const user = seed.users.find((item) => item.id === userId);
-  const trainerId = seed.trainers.find((item) => item.name === user?.name)?.id || userId;
+  const trainerId = trainerIdByUserId[userId];
+  if (!trainerId) return [];
   const ownBatchIds = new Set(seed.batches.filter((batch) => batch.trainer_id === trainerId).map((batch) => batch.id));
   const ownStudentIds = new Set(seed.students.filter((student) => ownBatchIds.has(student.batch_id)).map((student) => student.id));
   const ownSessionIds = new Set(seed.sessions.filter((session) => ownBatchIds.has(session.batch_id)).map((session) => session.id));
@@ -209,7 +211,9 @@ export async function addAuditEntry({ role, userId, event, detail }) {
     event,
     detail: typeof detail === "string" ? detail : JSON.stringify(detail),
   };
-  await insertSupabaseRow("audit_log", entry);
+  // This helper records local browser/SQLite activity only. Remote audit writes
+  // must go through a trusted server-side operation; direct client inserts are
+  // intentionally disabled by the Supabase policies.
   insertMasterRecord("audit_log", entry);
   return entry;
 }
@@ -218,18 +222,29 @@ export async function createApproval({ role, userId, kind, payload, preview }) {
   const allowedRequest = role === "owner" || role === "counselor" || (role === "trainer" && kind.startsWith("attendance_")) || (role === "accounts" && ["fee_reconciliation", "fee_action"].includes(kind));
   if (!allowedRequest) throw new Error(`The ${role} role cannot request this action.`);
   await getMaster();
+  const instituteContext = supabaseEnabled ? await getAuthenticatedInstituteContext() : null;
+  if (supabaseEnabled && !instituteContext) throw new Error("A verified InstituteOS membership is required.");
   const approval = {
     id: `APR-${crypto.randomUUID()}`,
     kind,
     payload: JSON.stringify(payload),
     preview,
     status: "pending",
-    requested_by: userId,
+    requested_by: instituteContext?.user_id || userId,
     decided_by: null,
     created_at: new Date().toISOString(),
     decided_at: null,
   };
-  await insertSupabaseRow("approvals", approval);
+  if (supabaseEnabled) {
+    const remote = await createRemoteApproval({
+      id: approval.id,
+      kind: approval.kind,
+      payload: payload ?? {},
+      preview: approval.preview,
+    });
+    if (remote?.id) approval.id = remote.id;
+    approval.created_at = remote?.created_at || approval.created_at;
+  }
   insertMasterRecord("approvals", approval);
   await addAuditEntry({ role, userId, event: "action_preview", detail: `${kind}: ${preview}` });
   return approval;
@@ -302,15 +317,23 @@ function applyApprovedAction(approval, payload) {
 export async function decideApproval({ approvalId, role, userId, decision, payload }) {
   if (!new Set(["approve", "reject"]).has(decision)) throw new Error("Decision must be approve or reject.");
   await getMaster();
+  const instituteContext = supabaseEnabled ? await getAuthenticatedInstituteContext() : null;
+  if (supabaseEnabled && !instituteContext) throw new Error("A verified InstituteOS membership is required.");
   const existing = rowsFromTable(master, "approvals").find((item) => item.id === approvalId);
   if (!existing || existing.status !== "pending") throw new Error("This approval is no longer pending.");
   const mayApprove = role === "owner" || (role === "accounts" && ["fee_reconciliation", "fee_action"].includes(existing.kind));
-  const mayReject = mayApprove || existing.requested_by === userId;
+  const mayReject = supabaseEnabled
+    ? mayApprove
+    : mayApprove || existing.requested_by === userId;
   if (decision === "approve" && !mayApprove) throw new Error("This role cannot approve the requested action.");
   if (decision === "reject" && !mayReject) throw new Error("This role cannot reject the requested action.");
   const savedPayload = payload === undefined ? existing.payload : JSON.stringify(payload);
-  const updates = { status: decision === "approve" ? "approved" : "rejected", decided_by: userId, decided_at: new Date().toISOString(), payload: savedPayload };
-  await updateSupabaseApproval(approvalId, updates);
+  const decidedBy = instituteContext?.user_id || userId;
+  const updates = { status: decision === "approve" ? "approved" : "rejected", decided_by: decidedBy, decided_at: new Date().toISOString(), payload: savedPayload };
+  if (supabaseEnabled) {
+    const editedReminderRecipients = decision === "approve" && existing.kind === "whatsapp_reminders" ? payload : undefined;
+    await decideRemoteApproval(approvalId, updates.status, editedReminderRecipients);
+  }
   master.run("BEGIN");
   try {
     if (decision === "approve") applyApprovedAction(existing, payload === undefined ? JSON.parse(existing.payload || "null") : payload);
@@ -348,4 +371,21 @@ export async function resetLocalDatabase() {
   scopedConnections.clear();
   localStorage.removeItem(STORAGE_KEY);
   return getMaster();
+}
+
+/** Remove cached audit events and role-scoped database connections on sign-out. */
+export async function clearLocalAuditLog() {
+  try {
+    const db = await getMaster();
+    db.run("DELETE FROM audit_log");
+    masterSeed = { ...masterSeed, audit_log: [] };
+    for (const scoped of scopedConnections.values()) scoped.close();
+    scopedConnections.clear();
+    persistMaster();
+  } catch {
+    try { master?.close(); } catch {}
+    master = null;
+    scopedConnections.clear();
+    try { localStorage.removeItem(STORAGE_KEY); } catch {}
+  }
 }
