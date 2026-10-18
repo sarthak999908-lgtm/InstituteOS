@@ -42,26 +42,66 @@ export function isIdentityFinanceQuestion(question) {
 }
 
 export function planIntent(question, context = {}) {
-  const normalized = question.toLowerCase();
+  const normalized = question.toLowerCase().trim();
   const batch = extractBatch(question, context.batch);
   const action = detectAction(question);
   const threshold = extractThreshold(question, context.threshold || 3);
   const finance = isFinanceQuestion(question);
 
+  // 1. Author / Creator / App Info
+  if (/author|who (made|created|built|designed|developed|wrote)|about (this|the) (app|system|software|platform)|what is (instituteos|acadix)/i.test(normalized)) {
+    return { intent: "system_author", batch, action };
+  }
+
+  // 2. User Identity ("who i am", "who am i", "my role", "auth name", "whoami")
+  if (/who\s*(?:am\s*i|i\s*am)|auth\s*name|my\s*role|my\s*profile|who\s*logged|user\s*profile|identity|my\s*name/i.test(normalized)) {
+    return { intent: "user_identity", batch, action };
+  }
+
+  // 3. Capabilities / Help ("what can you do", "help", "commands")
+  if (/what\s*can\s*you\s*do|help|how\s*to\s*use|features|what\s*are\s*you|capabilities/i.test(normalized)) {
+    return { intent: "system_help", batch, action };
+  }
+
+  // 4. Greetings
+  if (/^(?:hi|hello|hey|greetings|good\s*(?:morning|afternoon|evening)|howdy)\b/i.test(normalized)) {
+    return { intent: "system_greeting", batch, action };
+  }
+
+  // 5. Courses list
+  if (/courses?|programs?|subjects?|curriculum|syllabus/i.test(normalized) && !finance) {
+    return { intent: "list_courses", batch, action };
+  }
+
+  // 6. Trainers list
+  if (/trainers?|instructors?|faculty|teachers?/i.test(normalized) && !/hours|load|schedule|busy/.test(normalized)) {
+    return { intent: "list_trainers", batch, action };
+  }
+
+  // 7. Students directory
+  if (/students?|learners?|enrolled/i.test(normalized) && !/missed|absent|attendance|fee|emi/.test(normalized)) {
+    return { intent: "list_students", batch, action };
+  }
+
+  // 8. Finance & Fee queries
   if (/missed|absence|absent|skipped/.test(normalized) && finance) return { intent: "missed_emis", batch, threshold, action };
   if (/missed|absence|absent|skipped/.test(normalized)) return { intent: "missed_classes", batch, threshold, action };
   if (/collected|received/.test(normalized) && /today|month|this month/.test(normalized)) return { intent: "fees_collected", period: normalized.includes("today") ? "today" : "month", action };
-  if (finance && /overdue|due|pending|outstanding|balance|unpaid|paid|emi|instalment|installment/.test(normalized)) {
+  if (finance && /overdue|due|pending|outstanding|balance|unpaid|paid|emi|instalment|installment|fee|fees/.test(normalized)) {
     return { intent: "emi_due", period: normalized.includes("overdue") ? "overdue" : normalized.includes("today") ? "today" : "week", action };
   }
+
+  // 9. Operations queries
   if (/dropout|at risk|risk student/.test(normalized)) return { intent: "dropout_risk", threshold, action };
   if (/trainer|instructor/.test(normalized) && /load|hours|schedule|busy/.test(normalized)) return { intent: "trainer_load", action };
-  if (/free room|available room|room availability/.test(normalized)) return { intent: "free_rooms", action };
-  if (/absent today|who.*absent/.test(normalized)) return { intent: "absent_today", action };
+  if (/free room|available room|room availability|rooms?|labs?/.test(normalized)) return { intent: "free_rooms", action };
+  if (/absent today|who.*absent|today.*attendance|attendance/.test(normalized)) return { intent: "absent_today", action };
   if (/recording|recorded session/.test(normalized)) return { intent: "recordings", batch, action };
   if (/fill rate|capacity|how full/.test(normalized)) return { intent: "fill_rate", batch, action };
   if (/unpaid.*course|students?.*course.*(?:fee|emi|unpaid)/.test(normalized)) return { intent: "unpaid_by_course", action };
-  return { intent: "overview", batch, action };
+
+  // 10. General inquiry fallback (instead of refusing)
+  return { intent: "general_inquiry", question, batch, action };
 }
 
 export function dateWindow(period, now = new Date()) {

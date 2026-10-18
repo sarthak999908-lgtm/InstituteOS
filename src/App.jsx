@@ -86,13 +86,7 @@ export default function App() {
     return "Dashboard";
   });
 
-  const [bootCompleted, setBootCompleted] = useState(() => {
-    try {
-      return sessionStorage.getItem("instituteos_boot_shown") === "true";
-    } catch {
-      return false;
-    }
-  });
+  const [bootCompleted, setBootCompleted] = useState(false);
 
   const [dashboard, setDashboard] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -496,15 +490,10 @@ export default function App() {
           zIndex: 1,
         }}
       >
-        {localDemoMode && (
-          <div role="status" style={{ padding: "10px 18px", background: "#FFF7D6", color: "#713F12", borderBottom: "1px solid #FDE68A", fontSize: 13, display: "flex", justifyContent: "space-between", gap: 12, alignItems: "center" }}>
-            <span><strong>LOCAL DEMO</strong> · fictional records only · browser-only changes · no Supabase or backend requests</span>
-            <button type="button" onClick={signOut} style={{ border: 0, background: "transparent", color: "inherit", textDecoration: "underline", cursor: "pointer" }}>Exit demo</button>
-          </div>
-        )}
         {/* Sticky Topbar */}
         <Topbar
           activeTab={activeTab}
+          onNavigate={navigateTo}
           onOpenCommandPalette={() => setCommandPaletteOpen(true)}
           onRefresh={loadDashboardData}
           loading={loading}

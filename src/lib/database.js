@@ -154,13 +154,20 @@ export async function getRoleDatabase(role = "owner", userId = "USR-OWNER") {
   for (const [table, columns] of Object.entries(schema)) createTable(scoped, table, columns);
 
   if (supabaseEnabled) {
-    const remoteRows = await fetchSupabaseSeed(schema, role);
-    for (const [table, columns] of Object.entries(schema)) {
-      const rows = remoteRows[table] || [];
-      insertRows(scoped, table, columns, rows.map((row) => Object.fromEntries(columns.map((column) => [column, row[column] ?? null]))));
+    try {
+      const remoteRows = await fetchSupabaseSeed(schema, role);
+      const hasAnyData = remoteRows && Object.values(remoteRows).some((r) => Array.isArray(r) && r.length > 0);
+      if (hasAnyData) {
+        for (const [table, columns] of Object.entries(schema)) {
+          const rows = remoteRows[table] || [];
+          insertRows(scoped, table, columns, rows.map((row) => Object.fromEntries(columns.map((column) => [column, row[column] ?? null]))));
+        }
+        scopedConnections.set(key, scoped);
+        return scoped;
+      }
+    } catch (err) {
+      console.warn("fetchSupabaseSeed fallback to master seed:", err.message);
     }
-    scopedConnections.set(key, scoped);
-    return scoped;
   }
 
   const source = await getMaster();

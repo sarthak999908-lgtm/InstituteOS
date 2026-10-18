@@ -22,7 +22,7 @@ export {
   supabaseClient,
   supabaseEnabled,
   getSession,
-  signIn,
+  signInWithEmail,
   signOut,
   onAuthStateChange,
 } from "./supabase.js";

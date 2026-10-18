@@ -1,6 +1,8 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { createClient } from "@supabase/supabase-js";
 import { createHash, randomUUID } from "node:crypto";
 import { createCopilotService, CopilotFallbackRequired, isTrainerFinanceQuestion } from "./copilot/service.js";
@@ -1487,6 +1489,21 @@ app.use((error, req, res, next) => {
     return res.status(400).json({ success: false, error: "Request body must be valid JSON." });
   }
   return res.status(500).json({ success: false, error: "The request could not be completed." });
+});
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const distPath = path.resolve(__dirname, "..", "dist");
+
+// Serve Vite frontend in production
+app.use(express.static(distPath));
+app.use((req, res, next) => {
+  if (req.method === "GET" && !req.path.startsWith("/api/")) {
+    return res.sendFile(path.join(distPath, "index.html"), (err) => {
+      if (err) next();
+    });
+  }
+  next();
 });
 
 if (process.env.NODE_ENV !== "test") {

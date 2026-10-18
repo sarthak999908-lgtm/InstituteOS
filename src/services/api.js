@@ -3,7 +3,7 @@ import { localDemoMode } from "../lib/localDemo.js";
 import { localDemoApiResponse } from "./localDemoApi.js";
 
 const env = typeof import.meta !== "undefined" && import.meta.env ? import.meta.env : {};
-const API_BASE = env.VITE_API_URL || "http://localhost:5000/api";
+const API_BASE = env.VITE_API_URL || (typeof window !== "undefined" && window.location.origin ? `${window.location.origin}/api` : "http://localhost:5000/api");
 
 /**
  * Internal helper to retrieve auth headers with the current Supabase JWT token
@@ -314,11 +314,19 @@ export async function streamCopilotBackend(question, { signal, onStage, onText }
 }
 
 export async function auditCopilotEvent(event, detail) {
-  return apiFetch("/copilot/audit", { method: "POST", body: JSON.stringify({ event, detail }) });
+  try {
+    return await apiFetch("/copilot/audit", { method: "POST", body: JSON.stringify({ event, detail }) });
+  } catch {
+    return null;
+  }
 }
 
 export async function submitCopilotFeedback(answerId, feedback) {
-  return apiFetch("/copilot/feedback", { method: "POST", body: JSON.stringify({ answerId, feedback }) });
+  try {
+    return await apiFetch("/copilot/feedback", { method: "POST", body: JSON.stringify({ answerId, feedback }) });
+  } catch {
+    return null;
+  }
 }
 
 // ── 14. System Status & Diagnostics ──────────────────────────────────────────

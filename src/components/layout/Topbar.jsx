@@ -18,6 +18,7 @@ const ROLE_COLORS = {
 
 export default function Topbar({
   activeTab,
+  onNavigate,
   onOpenCommandPalette,
   onRefresh,
   loading = false,
@@ -71,13 +72,14 @@ export default function Topbar({
         display: "flex",
         alignItems: "center",
         justifyContent: "space-between",
-        padding: "0 20px",
+        gap: 16,
+        padding: "0 22px",
         zIndex: 40,
         boxShadow: "0 1px 3px rgba(15, 23, 42, 0.04)",
       }}
     >
       {/* Left: Mobile Toggle & Breadcrumbs */}
-      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 12, flexShrink: 0 }}>
         <button
           type="button"
           onClick={onOpenMobileMenu}
@@ -88,6 +90,7 @@ export default function Topbar({
             color: "var(--text-secondary)",
             cursor: "pointer",
             padding: 4,
+            display: "none",
           }}
           aria-label="Open sidebar"
         >
@@ -103,6 +106,7 @@ export default function Topbar({
             gap: 7,
             fontSize: "13px",
             fontFamily: "'Inter', sans-serif",
+            whiteSpace: "nowrap",
           }}
         >
           <span style={{ color: "var(--text-muted)", fontWeight: 500 }}>Workspace</span>
@@ -124,142 +128,73 @@ export default function Topbar({
         </nav>
       </div>
 
-      {/* Center: Command Palette Trigger */}
-      <button
-        type="button"
-        onClick={onOpenCommandPalette}
+      {/* Center: Clean Command Palette Search Bar */}
+      <div
+        className="topbar-search-container"
         style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 10,
-          background: "var(--surface)",
-          border: "1px solid var(--border)",
-          borderRadius: "var(--radius-sm)",
-          padding: "6px 14px",
-          color: "var(--text-secondary)",
-          fontSize: "12px",
-          cursor: "pointer",
-          boxShadow: "0 1px 2px rgba(15, 23, 42, 0.04)",
-          transition: "border-color 0.2s, box-shadow 0.2s",
+          flex: 1,
+          maxWidth: 460,
+          minWidth: 160,
+          margin: "0 12px",
         }}
-        onMouseEnter={(e) => (e.currentTarget.style.borderColor = "var(--border-hover)")}
-        onMouseLeave={(e) => (e.currentTarget.style.borderColor = "var(--border)")}
       >
-        <Search size={14} color="var(--accent-primary)" />
-        <span>Search commands, students, batches...</span>
-        <kbd
+        <button
+          type="button"
+          onClick={onOpenCommandPalette}
           style={{
-            background: "var(--surface-2)",
-            border: "1px solid var(--border)",
-            borderRadius: 4,
-            padding: "1px 5px",
-            fontSize: "10px",
-            fontFamily: "'JetBrains Mono', monospace",
-            color: "var(--text-muted)",
-          }}
-        >
-          ⌘K
-        </kbd>
-      </button>
-
-      {/* Right Controls */}
-      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-        {/* Accent Preset Picker */}
-        <AccentPicker />
-
-        {/* Theme Toggle (Sun/Moon morph) */}
-        <ThemeToggle />
-
-        {/* Live Data Connection Status */}
-        <div
-          style={{
+            width: "100%",
             display: "flex",
             alignItems: "center",
-            gap: 6,
-            fontSize: "11px",
-            padding: "4px 8px",
-            borderRadius: 16,
-            background: "var(--surface-2)",
-            border: "1px solid var(--border)",
-            color: "var(--text-secondary)",
-          }}
-        >
-          {error ? (
-            <>
-              <WifiOff size={13} color="var(--warning)" />
-              <span style={{ color: "var(--warning)" }}>Demo</span>
-            </>
-          ) : loading ? (
-            <>
-              <RefreshCw size={13} className="spinning" color="var(--accent-primary)" />
-              <span>Syncing…</span>
-            </>
-          ) : dashboard?.source === "fictional-local-demo" ? (
-            <>
-              <span style={{ width: 6, height: 6, borderRadius: "50%", background: "var(--warning)" }} />
-              <span style={{ color: "var(--warning)", fontWeight: 600 }}>Local demo</span>
-            </>
-          ) : (
-            <>
-              <span
-                style={{
-                  width: 6,
-                  height: 6,
-                  borderRadius: "50%",
-                  background: "var(--success)",
-                  boxShadow: "0 0 6px var(--success)",
-                  animation: "pulse-dot-green 2s infinite",
-                }}
-              />
-              <span style={{ color: "var(--success)", fontWeight: 600 }}>Live</span>
-            </>
-          )}
-        </div>
-
-        {/* Refresh Button */}
-        <button
-          type="button"
-          onClick={() => {
-            sound.tick();
-            if (onRefresh) onRefresh(true);
-          }}
-          style={{
-            background: "var(--surface-2)",
+            justifyContent: "space-between",
+            gap: 10,
+            background: "var(--surface)",
             border: "1px solid var(--border)",
             borderRadius: "var(--radius-sm)",
-            width: 34,
-            height: 34,
-            display: "grid",
-            placeItems: "center",
+            padding: "7px 14px",
             color: "var(--text-secondary)",
+            fontSize: "12px",
             cursor: "pointer",
+            boxShadow: "0 1px 2px rgba(15, 23, 42, 0.04)",
+            transition: "all 0.2s ease",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
           }}
-          title="Refresh workspace data"
-          aria-label="Refresh workspace"
+          onMouseEnter={(e) => {
+            e.currentTarget.style.borderColor = "var(--border-hover)";
+            e.currentTarget.style.background = "var(--surface-2)";
+          }}
+          onMouseLeave={(e) => {
+            e.currentTarget.style.borderColor = "var(--border)";
+            e.currentTarget.style.background = "var(--surface)";
+          }}
         >
-          <RefreshCw size={14} className={loading ? "spinning" : ""} />
+          <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, overflow: "hidden" }}>
+            <Search size={14} color="var(--accent-primary)" style={{ flexShrink: 0 }} />
+            <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+              Search commands, students, batches...
+            </span>
+          </div>
+          <kbd
+            style={{
+              flexShrink: 0,
+              background: "var(--surface-2)",
+              border: "1px solid var(--border)",
+              borderRadius: 4,
+              padding: "1px 5px",
+              fontSize: "10px",
+              fontFamily: "'JetBrains Mono', monospace",
+              color: "var(--text-muted)",
+            }}
+          >
+            ⌘K
+          </kbd>
         </button>
+      </div>
 
-        {/* Sound Toggle */}
-        <button
-          type="button"
-          onClick={toggleSound}
-          style={{
-            background: soundEnabled ? "var(--accent-badge-bg)" : "var(--surface-2)",
-            border: `1px solid ${soundEnabled ? "var(--accent-primary)" : "var(--border)"}`,
-            borderRadius: "var(--radius-sm)",
-            width: 34,
-            height: 34,
-            display: "grid",
-            placeItems: "center",
-            color: soundEnabled ? "var(--accent-primary)" : "var(--text-muted)",
-            cursor: "pointer",
-          }}
-          title={soundEnabled ? "Audio effects active (click to mute)" : "Audio muted (click to enable)"}
-          aria-label="Toggle sound"
-        >
-          {soundEnabled ? <Volume2 size={15} /> : <VolumeX size={15} />}
-        </button>
+      {/* Right Controls: Only Essential Items */}
+      <div style={{ display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
+        {/* Theme Toggle (Light / Dark) */}
+        <ThemeToggle />
 
         {/* Notification Bell with Wiggle */}
         <div style={{ position: "relative" }}>
